@@ -4,7 +4,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SVN_STATUS_CODES } from './types.js';
 import iconv from 'iconv-lite';
-import jschardet from 'jschardet';
 
 /**
  * Crear configuración de SVN desde variables de entorno y parámetros
@@ -119,28 +118,26 @@ export async function executeSvnCommand(
     let stdout = '';
     let stderr = '';
     
+    // Create streaming decoders to properly handle multi-byte characters across chunk boundaries
+    // Using UTF-8 as SVN output is configured to use UTF-8 via LANG/LC_ALL environment variables
+    // The encoding is consistent throughout the stream - it doesn't change mid-stream as per SVN behavior
+    const stdoutDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
+    const stderrDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
+    
     // Configurar timeout
     const timeout = setTimeout(() => {
       childProcess.kill('SIGTERM');
       reject(new SvnError(`Command timeout after ${config.timeout}ms: ${command}`));
     }, config.timeout);
     
-    // Capturar stdout
-    // Note: We detect encoding on each chunk to handle potential encoding changes
-    // in the stream and to support incremental processing of large outputs
+    // Capturar stdout using streaming decoder to handle multi-byte characters correctly
     childProcess.stdout?.on('data', (data) => {
-      const detected = jschardet.detect(data);
-      const encoding = detected && detected.encoding ? detected.encoding : 'utf8';
-      stdout += iconv.decode(data, encoding);
+      stdout += stdoutDecoder.write(data);
     });
     
-    // Capturar stderr
-    // Note: We detect encoding on each chunk to handle potential encoding changes
-    // in the stream and to support incremental processing of large outputs
+    // Capturar stderr using streaming decoder to handle multi-byte characters correctly
     childProcess.stderr?.on('data', (data) => {
-      const detected = jschardet.detect(data);
-      const encoding = detected && detected.encoding ? detected.encoding : 'utf8';
-      stderr += iconv.decode(data, encoding);
+      stderr += stderrDecoder.write(data);
     });
     
     // Enviar input si se proporciona
@@ -152,6 +149,10 @@ export async function executeSvnCommand(
     // Manejar finalización del proceso
     childProcess.on('close', (code) => {
       clearTimeout(timeout);
+      
+      // Finalize decoders to flush any remaining buffered data
+      stdout += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
       
       const executionTime = Date.now() - startTime;
       const response: SvnResponse = {
