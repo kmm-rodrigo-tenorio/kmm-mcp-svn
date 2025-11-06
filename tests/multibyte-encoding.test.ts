@@ -65,7 +65,7 @@ describe('Multi-byte Character Encoding Tests', () => {
       expect(streamResult).toBe(testString);
     });
 
-    it('should demonstrate the problem with per-chunk detection (current implementation)', () => {
+    it('should demonstrate the problem with per-chunk detection (old buggy approach)', () => {
       const testString = 'Test こんにちは';
       const fullBuffer = Buffer.from(testString, 'utf8');
       
@@ -74,10 +74,10 @@ describe('Multi-byte Character Encoding Tests', () => {
       const chunk1 = fullBuffer.slice(0, splitPoint);
       const chunk2 = fullBuffer.slice(splitPoint);
       
-      // Simulating the current buggy approach: detect and decode each chunk independently
+      // Simulating the previous buggy approach: detect and decode each chunk independently
       // Note: jschardet is not imported here to keep test isolated
-      // The current implementation does: jschardet.detect(chunk) then iconv.decode(chunk, detected)
-      // which fails when multi-byte chars are split
+      // The old implementation did: jschardet.detect(chunk) then iconv.decode(chunk, detected)
+      // which failed when multi-byte chars were split
       
       const wrongDecode1 = iconv.decode(chunk1, 'utf8');
       const wrongDecode2 = iconv.decode(chunk2, 'utf8');
