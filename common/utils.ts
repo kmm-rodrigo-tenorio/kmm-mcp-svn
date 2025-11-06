@@ -3,6 +3,8 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SVN_STATUS_CODES } from './types.js';
+import iconv from 'iconv-lite';
+import jschardet from 'jschardet';
 
 /**
  * Crear configuración de SVN desde variables de entorno y parámetros
@@ -125,12 +127,16 @@ export async function executeSvnCommand(
     
     // Capturar stdout
     childProcess.stdout?.on('data', (data) => {
-      stdout += data.toString(options.encoding || 'utf8');
+      const detected = jschardet.detect(data);
+      const encoding = detected && detected.encoding ? detected.encoding : 'utf8';
+      stdout += iconv.decode(data, encoding);
     });
     
     // Capturar stderr
     childProcess.stderr?.on('data', (data) => {
-      stderr += data.toString(options.encoding || 'utf8');
+      const detected = jschardet.detect(data);
+      const encoding = detected && detected.encoding ? detected.encoding : 'utf8';
+      stderr += iconv.decode(data, encoding);
     });
     
     // Enviar input si se proporciona
