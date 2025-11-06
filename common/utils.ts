@@ -120,6 +120,7 @@ export async function executeSvnCommand(
     
     // Create streaming decoders to properly handle multi-byte characters across chunk boundaries
     // Using UTF-8 as SVN output is configured to use UTF-8 via LANG/LC_ALL environment variables
+    // The encoding is consistent throughout the stream - it doesn't change mid-stream as per SVN behavior
     const stdoutDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
     const stderrDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
     
