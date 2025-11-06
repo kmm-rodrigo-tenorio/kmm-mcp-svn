@@ -126,6 +126,8 @@ export async function executeSvnCommand(
     }, config.timeout);
     
     // Capturar stdout
+    // Note: We detect encoding on each chunk to handle potential encoding changes
+    // in the stream and to support incremental processing of large outputs
     childProcess.stdout?.on('data', (data) => {
       const detected = jschardet.detect(data);
       const encoding = detected && detected.encoding ? detected.encoding : 'utf8';
@@ -133,6 +135,8 @@ export async function executeSvnCommand(
     });
     
     // Capturar stderr
+    // Note: We detect encoding on each chunk to handle potential encoding changes
+    // in the stream and to support incremental processing of large outputs
     childProcess.stderr?.on('data', (data) => {
       const detected = jschardet.detect(data);
       const encoding = detected && detected.encoding ? detected.encoding : 'utf8';

@@ -61,7 +61,7 @@ describe('Encoding Detection Tests', () => {
       const buffer = Buffer.from(chineseText, 'utf8');
       const decoded = iconv.decode(buffer, 'utf8');
       
-      expect(chineseText).toBe(decoded);
+      expect(decoded).toBe(chineseText);
     });
 
     it('should handle fallback to utf8 for unknown encodings', () => {
