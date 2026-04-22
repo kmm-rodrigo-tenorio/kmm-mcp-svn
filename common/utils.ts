@@ -100,17 +100,38 @@ export async function executeSvnCommand(
   const command = `${config.svnPath} ${finalArgs.join(' ')}`;
   
   return new Promise((resolve, reject) => {
+    // Build the environment for the child process.
+    // When the MCP is launched by Claude Desktop/Code the inherited env is
+    // sometimes sanitized, dropping System32 from PATH. Because we spawn
+    // with shell: true on Windows, Node has to locate cmd.exe through that
+    // PATH — if System32 is missing, spawn fails with "cmd.exe ENOENT".
+    // Pin ComSpec and make sure System32 is on PATH so the shell is
+    // always resolvable regardless of how the parent launched us.
+    const isWindows = process.platform === 'win32';
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      // Force SVN to use UTF-8
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8'
+    };
+
+    if (isWindows) {
+      const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+      const system32 = `${systemRoot}\\System32`;
+      childEnv.ComSpec = process.env.ComSpec || `${system32}\\cmd.exe`;
+      // Put System32 on PATH (idempotent — avoid duplicating if already present).
+      const existingPath = process.env.PATH || process.env.Path || '';
+      const pathParts = existingPath.split(';').filter(Boolean);
+      const hasSystem32 = pathParts.some(p => p.toLowerCase() === system32.toLowerCase());
+      childEnv.PATH = hasSystem32 ? existingPath : [existingPath, system32].filter(Boolean).join(';');
+    }
+
     // Configure spawn options for Windows
     const spawnOptions: SpawnOptions = {
       cwd: config.workingDirectory,
       shell: true, // Important on Windows
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        // Force SVN to use UTF-8
-        LANG: 'en_US.UTF-8',
-        LC_ALL: 'en_US.UTF-8'
-      }
+      env: childEnv
     };
     
     const childProcess = spawn(config.svnPath!, finalArgs, spawnOptions);
