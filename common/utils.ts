@@ -100,14 +100,23 @@ export async function executeSvnCommand(
   const command = `${config.svnPath} ${finalArgs.join(' ')}`;
   
   return new Promise((resolve, reject) => {
-    // Build the environment for the child process.
-    // When the MCP is launched by Claude Desktop/Code the inherited env is
-    // sometimes sanitized, dropping System32 from PATH. Because we spawn
-    // with shell: true on Windows, Node has to locate cmd.exe through that
-    // PATH — if System32 is missing, spawn fails with "cmd.exe ENOENT".
-    // Pin ComSpec and make sure System32 is on PATH so the shell is
-    // always resolvable regardless of how the parent launched us.
+    // On Windows, shell: true makes Node look up the shell via
+    // `process.env.comspec || 'cmd.exe'`. If Claude Desktop/Code has
+    // sanitized the env, comspec may be unset and bare 'cmd.exe' won't
+    // resolve without System32 on PATH, giving "spawn cmd.exe ENOENT".
+    //
+    // Fix: pass an ABSOLUTE cmd.exe path to `options.shell`. When
+    // `options.shell` is a string, Node skips the env lookup entirely
+    // and still recognises cmd.exe (via name regex) so it uses the
+    // correct `/d /s /c` switches.
+    //
+    // We still augment the child env so cmd.exe itself can locate svn
+    // and friends when spawning the command line.
     const isWindows = process.platform === 'win32';
+    const systemRoot = process.env.SystemRoot || process.env.systemroot || 'C:\\Windows';
+    const system32 = `${systemRoot}\\System32`;
+    const cmdPath = process.env.ComSpec || process.env.comspec || `${system32}\\cmd.exe`;
+
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       // Force SVN to use UTF-8
@@ -116,20 +125,27 @@ export async function executeSvnCommand(
     };
 
     if (isWindows) {
-      const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-      const system32 = `${systemRoot}\\System32`;
-      childEnv.ComSpec = process.env.ComSpec || `${system32}\\cmd.exe`;
-      // Put System32 on PATH (idempotent — avoid duplicating if already present).
+      childEnv.ComSpec = cmdPath;
+      childEnv.SystemRoot = systemRoot;
+
+      // Collapse duplicate-cased PATH entries (Windows inherited env often
+      // ships 'Path'; if we also set 'PATH' the two may race). Keep a
+      // single 'PATH' key and make sure System32 is present.
+      for (const k of Object.keys(childEnv)) {
+        if (k !== 'PATH' && k.toLowerCase() === 'path') delete childEnv[k];
+      }
       const existingPath = process.env.PATH || process.env.Path || '';
       const pathParts = existingPath.split(';').filter(Boolean);
       const hasSystem32 = pathParts.some(p => p.toLowerCase() === system32.toLowerCase());
-      childEnv.PATH = hasSystem32 ? existingPath : [existingPath, system32].filter(Boolean).join(';');
+      childEnv.PATH = hasSystem32 ? existingPath : [...pathParts, system32].join(';');
     }
 
-    // Configure spawn options for Windows
     const spawnOptions: SpawnOptions = {
       cwd: config.workingDirectory,
-      shell: true, // Important on Windows
+      // Absolute cmd.exe path on Windows so Node doesn't consult the
+      // (possibly sanitized) parent env to locate the shell.
+      shell: isWindows ? cmdPath : true,
+      windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv
     };
