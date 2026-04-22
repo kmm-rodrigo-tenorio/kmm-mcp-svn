@@ -203,10 +203,17 @@ npm run build
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SVN_PATH` | Path to the SVN executable | `svn` |
-| `SVN_WORKING_DIRECTORY` | Working directory | `process.cwd()` |
+| `SVN_WORKING_DIRECTORY` | Local working copy directory | `process.cwd()` |
+| `SVN_URL` (alias: `SVN_REPOSITORY_URL`) | Repository URL. Enables URL-only workflows and `/trunk/...` target resolution | - |
 | `SVN_USERNAME` | Authentication user | - |
 | `SVN_PASSWORD` | Authentication password | - |
 | `SVN_TIMEOUT` | Timeout in milliseconds | `30000` |
+
+`SVN_WORKING_DIRECTORY` and `SVN_URL` are independent — set either or both. With both configured, local operations (`svn_status`, `svn_commit`, ...) run in the working copy, and URL-capable tools (`svn_cat`, `svn_list`, `svn_info`, `svn_log`, `svn_diff`) can be called with:
+
+- a full URL (`https://svn.example.com/repo/trunk/file.sql`)
+- a repo-relative path starting with `/` (`/trunk/file.sql`) — joined with `SVN_URL`
+- a local path — resolved against the working copy
 
 ### Example MCP Configuration
 
@@ -218,7 +225,8 @@ npm run build
       "args": ["@grec0/mcp-svn"],
       "env": {
         "SVN_PATH": "svn",
-        "SVN_WORKING_DIRECTORY": "/path/to/working/copy",
+        "SVN_WORKING_DIRECTORY": "C:/path/to/working/copy",
+        "SVN_URL": "https://svn.example.com/repo",
         "SVN_USERNAME": "your_username",
         "SVN_PASSWORD": "your_password"
       }

@@ -27,6 +27,7 @@ import {
   normalizePath,
   validatePath,
   validateSvnUrl,
+  resolveTarget,
   cleanOutput,
   formatDuration,
   clearSvnCredentials
@@ -131,16 +132,7 @@ export class SvnService {
     try {
       const args = ['info'];
       if (path) {
-        // Check if it's a URL or a local path
-        if (validateSvnUrl(path)) {
-          // It's a URL, add it directly without normalization
-          args.push(path);
-        } else if (validatePath(path)) {
-          // It's a local path, normalize it
-          args.push(normalizePath(path));
-        } else {
-          throw new SvnError(`Invalid path or URL: ${path}`);
-        }
+        args.push(resolveTarget(path, this.config).value);
       }
 
       const response = await executeSvnCommand(this.config, args);
@@ -208,26 +200,23 @@ export class SvnService {
    * Get change history (log)
    */
   async getLog(
-    path?: string, 
-    limit?: number, 
+    path?: string,
+    limit?: number,
     revision?: string
   ): Promise<SvnResponse<SvnLogEntry[]>> {
     try {
       const args = ['log'];
-      
+
       if (limit && limit > 0) {
         args.push('--limit', limit.toString());
       }
-      
+
       if (revision) {
         args.push('--revision', revision);
       }
-      
+
       if (path) {
-        if (!validatePath(path)) {
-          throw new SvnError(`Invalid path: ${path}`);
-        }
-        args.push(normalizePath(path));
+        args.push(resolveTarget(path, this.config).value);
       }
 
       let response;
@@ -295,20 +284,19 @@ export class SvnService {
   ): Promise<SvnResponse<string>> {
     try {
       const args = ['diff'];
-      
+      const resolved = path ? resolveTarget(path, this.config).value : undefined;
+
       if (oldRevision && newRevision) {
-        args.push('--old', `${path || '.'}@${oldRevision}`);
-        args.push('--new', `${path || '.'}@${newRevision}`);
+        const base = resolved || '.';
+        args.push('--old', `${base}@${oldRevision}`);
+        args.push('--new', `${base}@${newRevision}`);
       } else if (oldRevision) {
         args.push('--revision', oldRevision);
-        if (path) {
-          args.push(normalizePath(path));
+        if (resolved) {
+          args.push(resolved);
         }
-      } else if (path) {
-        if (!validatePath(path)) {
-          throw new SvnError(`Invalid path: ${path}`);
-        }
-        args.push(normalizePath(path));
+      } else if (resolved) {
+        args.push(resolved);
       }
 
       const response = await executeSvnCommand(this.config, args);
@@ -842,13 +830,7 @@ export class SvnService {
         args.push('--revision', String(options.revision));
       }
 
-      if (validateSvnUrl(target)) {
-        args.push(target);
-      } else if (validatePath(target)) {
-        args.push(normalizePath(target));
-      } else {
-        throw new SvnError(`Invalid path or URL: ${target}`);
-      }
+      args.push(resolveTarget(target, this.config).value);
 
       const response = await executeSvnCommand(this.config, args);
 
@@ -895,13 +877,7 @@ export class SvnService {
       }
 
       if (target) {
-        if (validateSvnUrl(target)) {
-          args.push(target);
-        } else if (validatePath(target)) {
-          args.push(normalizePath(target));
-        } else {
-          throw new SvnError(`Invalid path or URL: ${target}`);
-        }
+        args.push(resolveTarget(target, this.config).value);
       }
 
       const response = await executeSvnCommand(this.config, args);

@@ -113,9 +113,9 @@ server.tool(
 // 2. Get repository information
 server.tool(
   "svn_info",
-  "Get detailed information about the working copy or a specific file",
+  "Get detailed information about the working copy or a specific file. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured).",
   {
-    path: z.string().optional().describe("Specific path to inspect (optional)")
+    path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'")
   },
   async (args) => {
     try {
@@ -202,9 +202,9 @@ server.tool(
 // 4. Get change history
 server.tool(
   "svn_log",
-  "Show the commit history of the repository",
+  "Show the commit history of the repository. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured).",
   {
-    path: z.string().optional().describe("Specific path"),
+    path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
     limit: z.number().optional().default(10).describe("Maximum number of entries"),
     revision: z.string().optional().describe("Specific revision or range (e.g. 100:200)")
   },
@@ -243,9 +243,9 @@ server.tool(
 // 5. View differences
 server.tool(
   "svn_diff",
-  "Show differences between file revisions",
+  "Show differences between file revisions. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured).",
   {
-    path: z.string().optional().describe("Specific path"),
+    path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
     oldRevision: z.string().optional().describe("Old revision"),
     newRevision: z.string().optional().describe("New revision")
   },
@@ -539,9 +539,9 @@ server.tool(
 // 13. Show the contents of a versioned file (svn cat)
 server.tool(
   "svn_cat",
-  "Show the contents of a versioned file from the working copy or a repository URL",
+  "Show the contents of a versioned file. Target may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured, so you can just pass '/trunk/path/to/file.sql').",
   {
-    target: z.string().describe("Local path or URL of the SVN file"),
+    target: z.string().describe("Local path, full URL, or repo-relative path like '/trunk/foo.sql'"),
     revision: z.union([
       z.number(),
       z.literal("HEAD"),
@@ -581,9 +581,9 @@ server.tool(
 // 14. List entries of a versioned directory (svn list)
 server.tool(
   "svn_list",
-  "List files and directories of a versioned path (working copy or repository URL)",
+  "List files and directories of a versioned path. Target may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured). Defaults to the working copy when omitted.",
   {
-    target: z.string().optional().describe("Local path or URL to list (defaults to working copy)"),
+    target: z.string().optional().describe("Local path, full URL, or repo-relative path like '/tags' (defaults to working copy)"),
     revision: z.union([
       z.number(),
       z.literal("HEAD"),
@@ -687,6 +687,13 @@ async function runServer() {
       console.error("Info: SVN_WORKING_DIRECTORY not set, using current directory");
     } else {
       console.error("SVN_WORKING_DIRECTORY:", process.env.SVN_WORKING_DIRECTORY);
+    }
+
+    const urlEnv = process.env.SVN_URL || process.env.SVN_REPOSITORY_URL;
+    if (urlEnv) {
+      console.error("SVN_URL:", urlEnv);
+    } else {
+      console.error("Info: SVN_URL not set — repo-relative targets (e.g. '/trunk/...') will be treated as local paths");
     }
 
     if (process.env.SVN_USERNAME) {

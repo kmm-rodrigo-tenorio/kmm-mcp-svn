@@ -6,12 +6,40 @@ import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SvnL
 import iconv from 'iconv-lite';
 
 /**
- * Create SVN configuration from environment variables and parameters
+ * Create SVN configuration from environment variables and parameters.
+ *
+ * Environment variables:
+ *   SVN_PATH                - path to the svn executable (default: 'svn')
+ *   SVN_WORKING_DIRECTORY   - local working-copy directory (optional)
+ *   SVN_URL / SVN_REPOSITORY_URL - repository URL (optional; used to
+ *                             resolve repo-relative targets like
+ *                             `/trunk/file.sql` and to run URL-only
+ *                             commands without a working copy)
+ *   SVN_USERNAME, SVN_PASSWORD
+ *   SVN_TIMEOUT             - command timeout in ms (default: 30000)
  */
 export function createSvnConfig(overrides: Partial<SvnConfig> = {}): SvnConfig {
+  const envWorkingDir = process.env.SVN_WORKING_DIRECTORY;
+  let workingDirectory = overrides.workingDirectory || envWorkingDir || process.cwd();
+  let url = overrides.url || process.env.SVN_URL || process.env.SVN_REPOSITORY_URL;
+
+  // Backward-compat: SVN_WORKING_DIRECTORY used to be overloaded with a
+  // repository URL. Promote it to `url` and fall back cwd to something
+  // valid, but warn so the user migrates to SVN_URL.
+  if (!overrides.workingDirectory && envWorkingDir && validateSvnUrl(envWorkingDir)) {
+    if (!url) url = envWorkingDir;
+    workingDirectory = process.cwd();
+    console.warn(
+      `[svn-mcp] SVN_WORKING_DIRECTORY is set to a URL ("${envWorkingDir}"). ` +
+      `Treating it as SVN_URL for backward compatibility. ` +
+      `Please migrate to SVN_URL and set SVN_WORKING_DIRECTORY to a local path (or unset it).`
+    );
+  }
+
   return {
     svnPath: overrides.svnPath || process.env.SVN_PATH || 'svn',
-    workingDirectory: overrides.workingDirectory || process.env.SVN_WORKING_DIRECTORY || process.cwd(),
+    workingDirectory,
+    url,
     username: overrides.username || process.env.SVN_USERNAME,
     password: overrides.password || process.env.SVN_PASSWORD,
     timeout: overrides.timeout || parseInt(process.env.SVN_TIMEOUT || '30000', 10)
@@ -485,11 +513,57 @@ export function getRelativePath(fullPath: string, workingDirectory: string): str
 }
 
 /**
- * Validate an SVN repository URL
+ * Validate an SVN repository URL. Recognises svn://, svn+<tunnel>://
+ * (e.g. svn+ssh://), http(s):// and file://.
  */
 export function validateSvnUrl(url: string): boolean {
-  const svnUrlPattern = /^(svn|https?|file):\/\/.+/i;
+  const svnUrlPattern = /^(svn(\+[a-z0-9]+)?|https?|file):\/\/.+/i;
   return svnUrlPattern.test(url);
+}
+
+/**
+ * Join a repository base URL with a repo-relative path. Preserves the
+ * exact encoding of the inputs — we do not re-encode callers' input.
+ */
+export function joinRepoUrl(baseUrl: string, repoPath: string): string {
+  const base = baseUrl.replace(/\/+$/, '');
+  const rel = repoPath.replace(/^\/+/, '');
+  return rel ? `${base}/${rel}` : base;
+}
+
+export interface ResolvedTarget {
+  /** Final value to pass to svn on the command line. */
+  value: string;
+  kind: 'url' | 'path';
+}
+
+/**
+ * Resolve a user-supplied target that may be a URL, a repo-relative
+ * path (`/trunk/foo`), or a local path, according to the configured
+ * working copy and repository URL.
+ *
+ * Resolution order:
+ *   1. Full URL (http(s)://, svn[+tunnel]://, file://) — used as-is.
+ *   2. Starts with `/` and `config.url` is set — joined to `config.url`.
+ *   3. Otherwise — treated as a local filesystem path and normalized.
+ */
+export function resolveTarget(target: string, config: SvnConfig): ResolvedTarget {
+  if (!target || typeof target !== 'string') {
+    throw new SvnError('Target is required');
+  }
+
+  if (validateSvnUrl(target)) {
+    return { value: target, kind: 'url' };
+  }
+
+  if (target.startsWith('/') && config.url) {
+    return { value: joinRepoUrl(config.url, target), kind: 'url' };
+  }
+
+  if (!validatePath(target)) {
+    throw new SvnError(`Invalid path or URL: ${target}`);
+  }
+  return { value: normalizePath(target), kind: 'path' };
 }
 
 /**

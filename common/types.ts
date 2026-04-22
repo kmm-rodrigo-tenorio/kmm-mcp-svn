@@ -3,6 +3,12 @@
 export interface SvnConfig {
   svnPath?: string;
   workingDirectory?: string;
+  /**
+   * Repository URL. When set, bare repo-relative targets like
+   * `/trunk/file.sql` are resolved against it, and URL-only workflows
+   * no longer require a working copy.
+   */
+  url?: string;
   username?: string;
   password?: string;
   timeout?: number;
