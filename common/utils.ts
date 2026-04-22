@@ -140,8 +140,21 @@ export async function executeSvnCommand(
       childEnv.PATH = hasSystem32 ? existingPath : [...pathParts, system32].join(';');
     }
 
+    // Resolve cwd. If SVN_WORKING_DIRECTORY is configured as a repository
+    // URL (valid use case for URL-targeted commands like `svn cat <url>`),
+    // we can't pass it to CreateProcess as cwd — Windows raises
+    // ERROR_PATH_NOT_FOUND which libuv surfaces as a misleading
+    // "spawn <exe> ENOENT" attached to the executable. Fall back to
+    // process.cwd() in that case; URL commands pass the URL as an arg so
+    // cwd doesn't matter, and local commands that need a working copy
+    // won't have been given a URL here.
+    let resolvedCwd = config.workingDirectory;
+    if (!resolvedCwd || validateSvnUrl(resolvedCwd)) {
+      resolvedCwd = process.cwd();
+    }
+
     const spawnOptions: SpawnOptions = {
-      cwd: config.workingDirectory,
+      cwd: resolvedCwd,
       // Absolute cmd.exe path on Windows so Node doesn't consult the
       // (possibly sanitized) parent env to locate the shell.
       shell: isWindows ? cmdPath : true,
