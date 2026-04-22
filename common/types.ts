@@ -1,4 +1,4 @@
-// ===== TIPOS BASE =====
+// ===== BASE TYPES =====
 
 export interface SvnConfig {
   svnPath?: string;
@@ -28,7 +28,7 @@ export class SvnError extends Error {
   }
 }
 
-// ===== TIPOS DE INFORMACIÓN DEL REPOSITORIO =====
+// ===== REPOSITORY INFORMATION TYPES =====
 
 export interface SvnInfo {
   path: string;
@@ -71,7 +71,7 @@ export interface SvnChangedPath {
   copyFromRev?: number;
 }
 
-// ===== TIPOS DE DIFERENCIAS =====
+// ===== DIFF TYPES =====
 
 export interface SvnDiff {
   oldPath: string;
@@ -96,7 +96,7 @@ export interface SvnDiffLine {
   newLineNumber?: number;
 }
 
-// ===== TIPOS DE RAMAS =====
+// ===== BRANCH TYPES =====
 
 export interface SvnBranch {
   name: string;
@@ -112,7 +112,7 @@ export interface SvnMergeInfo {
   eligibleRevisions: number[];
 }
 
-// ===== TIPOS DE PROPIEDADES =====
+// ===== PROPERTY TYPES =====
 
 export interface SvnProperty {
   name: string;
@@ -125,7 +125,7 @@ export interface SvnPropertyList {
   properties: Record<string, string>;
 }
 
-// ===== TIPOS DE LOCK =====
+// ===== LOCK TYPES =====
 
 export interface SvnLock {
   path: string;
@@ -136,7 +136,7 @@ export interface SvnLock {
   expires?: string;
 }
 
-// ===== TIPOS DE BLAME/ANNOTATION =====
+// ===== BLAME/ANNOTATION TYPES =====
 
 export interface SvnBlameLine {
   revision: number;
@@ -151,7 +151,7 @@ export interface SvnBlame {
   lines: SvnBlameLine[];
 }
 
-// ===== TIPOS PARA OPERACIONES DE ARCHIVOS =====
+// ===== FILE OPERATION TYPES =====
 
 export interface SvnAddOptions {
   force?: boolean;
@@ -202,7 +202,7 @@ export interface SvnDeleteOptions {
   keepLocal?: boolean;
 }
 
-// ===== TIPOS PARA MERGE =====
+// ===== MERGE TYPES =====
 
 export interface SvnMergeOptions {
   dryRun?: boolean;
@@ -212,7 +212,7 @@ export interface SvnMergeOptions {
   acceptConflicts?: 'postpone' | 'base' | 'mine-conflict' | 'theirs-conflict' | 'mine-full' | 'theirs-full';
 }
 
-// ===== TIPOS PARA SWITCH =====
+// ===== SWITCH TYPES =====
 
 export interface SvnSwitchOptions {
   revision?: number | 'HEAD';
@@ -221,14 +221,14 @@ export interface SvnSwitchOptions {
   acceptConflicts?: 'postpone' | 'base' | 'mine-conflict' | 'theirs-conflict' | 'mine-full' | 'theirs-full';
 }
 
-// ===== TIPOS PARA RESOLVE =====
+// ===== RESOLVE TYPES =====
 
 export interface SvnResolveOptions {
   accept: 'base' | 'working' | 'mine-conflict' | 'theirs-conflict' | 'mine-full' | 'theirs-full';
   recursive?: boolean;
 }
 
-// ===== TIPOS PARA IMPORT/EXPORT =====
+// ===== IMPORT/EXPORT TYPES =====
 
 export interface SvnImportOptions {
   message: string;
@@ -245,7 +245,30 @@ export interface SvnExportOptions {
   ignoreExternals?: boolean;
 }
 
-// ===== TIPOS PARA HERRAMIENTAS DE ANÁLISIS =====
+// ===== CAT / LIST TYPES =====
+
+export interface SvnCatOptions {
+  revision?: number | 'HEAD' | 'BASE' | 'COMMITTED' | 'PREV' | string;
+}
+
+export interface SvnListOptions {
+  revision?: number | 'HEAD' | 'BASE' | 'COMMITTED' | 'PREV' | string;
+  verbose?: boolean;
+  recursive?: boolean;
+  depth?: 'empty' | 'files' | 'immediates' | 'infinity';
+  includeExternals?: boolean;
+}
+
+export interface SvnListEntry {
+  name: string;
+  kind: 'file' | 'dir';
+  size?: number;
+  revision?: number;
+  author?: string;
+  date?: string;
+}
+
+// ===== ANALYSIS TOOL TYPES =====
 
 export interface SvnWorkingCopySummary {
   info: SvnInfo;
@@ -285,7 +308,7 @@ export interface SvnHealthIssue {
   suggestion?: string;
 }
 
-// ===== TIPOS PARA OPERACIONES EN LOTE =====
+// ===== BATCH OPERATION TYPES =====
 
 export interface SvnBatchOperation {
   type: 'add' | 'delete' | 'move' | 'copy' | 'revert';
@@ -301,7 +324,7 @@ export interface SvnBatchResult {
   result?: any;
 }
 
-// ===== CONSTANTES =====
+// ===== CONSTANTS =====
 
 export const SVN_STATUS_CODES = {
   ' ': 'none',

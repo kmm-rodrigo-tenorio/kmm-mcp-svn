@@ -2,22 +2,22 @@
 
 echo "Starting SVN MCP Server..."
 
-# Verificar si Node.js está disponible
+# Check whether Node.js is available
 if ! command -v node &> /dev/null; then
-    echo "Error: Node.js no está instalado o no está en PATH"
+    echo "Error: Node.js is not installed or not in PATH"
     exit 1
 fi
 
-# Verificar si el proyecto está compilado
+# Check whether the project has been built
 if [ ! -f "dist/index.js" ]; then
-    echo "Compilando el proyecto..."
+    echo "Building the project..."
     npm run build
     if [ $? -ne 0 ]; then
-        echo "Error: Falló la compilación"
+        echo "Error: Build failed"
         exit 1
     fi
 fi
 
-# Ejecutar el servidor MCP
-echo "Ejecutando SVN MCP Server..."
-node dist/index.js 
+# Run the MCP server
+echo "Running SVN MCP Server..."
+node dist/index.js

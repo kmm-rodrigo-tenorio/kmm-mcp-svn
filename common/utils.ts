@@ -2,11 +2,11 @@ import { spawn, SpawnOptions } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
-import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SVN_STATUS_CODES } from './types.js';
+import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SvnListEntry, SVN_STATUS_CODES } from './types.js';
 import iconv from 'iconv-lite';
 
 /**
- * Crear configuración de SVN desde variables de entorno y parámetros
+ * Create SVN configuration from environment variables and parameters
  */
 export function createSvnConfig(overrides: Partial<SvnConfig> = {}): SvnConfig {
   return {
@@ -19,7 +19,7 @@ export function createSvnConfig(overrides: Partial<SvnConfig> = {}): SvnConfig {
 }
 
 /**
- * Validar que SVN esté disponible en el sistema
+ * Validate that SVN is available on the system
  */
 export async function validateSvnInstallation(config: SvnConfig): Promise<boolean> {
   try {
@@ -31,7 +31,7 @@ export async function validateSvnInstallation(config: SvnConfig): Promise<boolea
 }
 
 /**
- * Detectar si el directorio actual es un working copy de SVN
+ * Detect whether the current directory is an SVN working copy
  */
 export async function isWorkingCopy(workingDirectory: string): Promise<boolean> {
   try {
@@ -43,17 +43,17 @@ export async function isWorkingCopy(workingDirectory: string): Promise<boolean> 
 }
 
 /**
- * Normalizar rutas para Windows
+ * Normalize paths for Windows
  */
 export function normalizePath(filePath: string): string {
   return path.resolve(filePath).replace(/\\/g, '/');
 }
 
 /**
- * Escapar argumentos para línea de comandos en Windows
+ * Escape arguments for the Windows command line
  */
 export function escapeArgument(arg: string): string {
-  // Si el argumento contiene espacios o caracteres especiales, lo encerramos en comillas
+  // If the argument contains spaces or special characters, wrap it in quotes
   if (/[\s&()<>[\]{}^=;!'+,`~%]/.test(arg)) {
     return `"${arg.replace(/"/g, '""')}"`;
   }
@@ -61,7 +61,7 @@ export function escapeArgument(arg: string): string {
 }
 
 /**
- * Construir argumentos de autenticación
+ * Build authentication arguments
  */
 export function buildAuthArgs(config: SvnConfig, options: { noAuthCache?: boolean } = {}): string[] {
   const args: string[] = [];
@@ -74,10 +74,10 @@ export function buildAuthArgs(config: SvnConfig, options: { noAuthCache?: boolea
     args.push('--password', config.password);
   }
   
-  // Siempre usar --non-interactive para evitar prompts
+  // Always use --non-interactive to avoid prompts
   args.push('--non-interactive');
-  
-  // Opción para no usar cache de credenciales (útil para E215004)
+
+  // Option to skip the credentials cache (useful for E215004)
   if (options.noAuthCache) {
     args.push('--no-auth-cache');
   }
@@ -86,7 +86,7 @@ export function buildAuthArgs(config: SvnConfig, options: { noAuthCache?: boolea
 }
 
 /**
- * Ejecutar comando SVN con manejo de errores mejorado
+ * Execute an SVN command with improved error handling
  */
 export async function executeSvnCommand(
   config: SvnConfig,
@@ -95,19 +95,19 @@ export async function executeSvnCommand(
 ): Promise<SvnResponse> {
   const startTime = Date.now();
   
-  // Agregar argumentos de autenticación
+  // Append authentication arguments
   const finalArgs = [...args, ...buildAuthArgs(config, { noAuthCache: options.noAuthCache })];
   const command = `${config.svnPath} ${finalArgs.join(' ')}`;
   
   return new Promise((resolve, reject) => {
-    // Configurar opciones de spawn para Windows
+    // Configure spawn options for Windows
     const spawnOptions: SpawnOptions = {
       cwd: config.workingDirectory,
-      shell: true, // Importante para Windows
+      shell: true, // Important on Windows
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        // Asegurar que SVN use UTF-8
+        // Force SVN to use UTF-8
         LANG: 'en_US.UTF-8',
         LC_ALL: 'en_US.UTF-8'
       }
@@ -124,29 +124,29 @@ export async function executeSvnCommand(
     const stdoutDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
     const stderrDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
     
-    // Configurar timeout
+    // Configure timeout
     const timeout = setTimeout(() => {
       childProcess.kill('SIGTERM');
       reject(new SvnError(`Command timeout after ${config.timeout}ms: ${command}`));
     }, config.timeout);
     
-    // Capturar stdout using streaming decoder to handle multi-byte characters correctly
+    // Capture stdout using streaming decoder to handle multi-byte characters correctly
     childProcess.stdout?.on('data', (data) => {
       stdout += stdoutDecoder.write(data);
     });
-    
-    // Capturar stderr using streaming decoder to handle multi-byte characters correctly
+
+    // Capture stderr using streaming decoder to handle multi-byte characters correctly
     childProcess.stderr?.on('data', (data) => {
       stderr += stderrDecoder.write(data);
     });
-    
-    // Enviar input si se proporciona
+
+    // Write input if provided
     if (options.input && childProcess.stdin) {
       childProcess.stdin.write(options.input);
       childProcess.stdin.end();
     }
-    
-    // Manejar finalización del proceso
+
+    // Handle process completion
     childProcess.on('close', (code) => {
       clearTimeout(timeout);
       
@@ -178,7 +178,7 @@ export async function executeSvnCommand(
       }
     });
     
-    // Manejar errores del proceso
+    // Handle process errors
     childProcess.on('error', (error) => {
       clearTimeout(timeout);
       
@@ -191,14 +191,14 @@ export async function executeSvnCommand(
 }
 
 /**
- * Parsear output XML de SVN
+ * Parse SVN XML output
  */
 export function parseXmlOutput(xmlString: string): any {
-  // Implementación básica de parsing XML
-  // En un entorno de producción, sería mejor usar una librería como xml2js
+  // Basic XML parsing implementation
+  // In a production environment it would be better to use a library like xml2js
   try {
-    // Esta es una implementación simplificada para Node.js
-    // En navegadores se usaría DOMParser, pero en Node.js necesitamos otra aproximación
+    // This is a simplified implementation for Node.js
+    // In browsers we would use DOMParser, but in Node.js we need another approach
     const lines = xmlString.split('\n');
     const result: any = {};
     
@@ -216,7 +216,7 @@ export function parseXmlOutput(xmlString: string): any {
 }
 
 /**
- * Parsear información de svn info
+ * Parse output of `svn info`
  */
 export function parseInfoOutput(output: string): SvnInfo {
   const lines = output.split('\n');
@@ -276,7 +276,7 @@ export function parseInfoOutput(output: string): SvnInfo {
 }
 
 /**
- * Parsear output de svn status
+ * Parse output of `svn status`
  */
 export function parseStatusOutput(output: string): SvnStatus[] {
   const lines = output.split('\n').filter(line => line.trim());
@@ -301,24 +301,24 @@ export function parseStatusOutput(output: string): SvnStatus[] {
 }
 
 /**
- * Parsear output de svn log
+ * Parse output of `svn log`
  */
 export function parseLogOutput(output: string): SvnLogEntry[] {
   const entries: SvnLogEntry[] = [];
-  
+
   if (!output || output.trim().length === 0) {
     return entries;
   }
-  
-  // Dividir por las líneas separadoras de SVN log
+
+  // Split on the SVN log separator lines
   const logEntries = output.split(/^-{72}$/gm).filter(entry => entry.trim());
-  
+
   for (const entryText of logEntries) {
     const lines = entryText.trim().split('\n');
     if (lines.length < 2) continue;
-    
+
     const headerLine = lines[0];
-    // Patrón más flexible para el header
+    // Flexible header pattern
     const headerMatch = headerLine.match(/^r(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.*)$/);
     
     if (headerMatch) {
@@ -330,7 +330,7 @@ export function parseLogOutput(output: string): SvnLogEntry[] {
           revision: parseInt(revision, 10),
           author: author.trim(),
           date: date.trim(),
-          message: message || 'Sin mensaje'
+          message: message || 'No message'
         });
       } catch (parseError) {
         console.warn(`Warning: Failed to parse log entry: ${parseError}`);
@@ -343,7 +343,52 @@ export function parseLogOutput(output: string): SvnLogEntry[] {
 }
 
 /**
- * Formatear duración en milisegundos a formato legible
+ * Parse output of `svn list`. Supports both simple and verbose modes.
+ * Simple: one name per line; directories end with '/'.
+ * Verbose: "REV AUTHOR [SIZE] DATE NAME" — size is absent for directories.
+ */
+export function parseListOutput(output: string, verbose: boolean = false): SvnListEntry[] {
+  const entries: SvnListEntry[] = [];
+  if (!output || output.trim().length === 0) {
+    return entries;
+  }
+
+  const lines = output.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.length > 0);
+
+  if (!verbose) {
+    for (const rawName of lines) {
+      const isDir = rawName.endsWith('/');
+      const name = isDir ? rawName.slice(0, -1) : rawName;
+      if (!name) continue;
+      entries.push({ name, kind: isDir ? 'dir' : 'file' });
+    }
+    return entries;
+  }
+
+  // Verbose: REV AUTHOR [SIZE] DATE... NAME
+  // SIZE only appears for files; DATE spans multiple tokens (month day year/time).
+  // Regex: 4 fixed tokens (rev, author, size-or-empty, date-block) + name.
+  const verboseRegex = /^\s*(\d+)\s+(\S+)\s+(?:(\d+)\s+)?(\S+\s+\S+\s+\S+)\s+(.+?)\s*$/;
+  for (const line of lines) {
+    const m = line.match(verboseRegex);
+    if (!m) continue;
+    const [, rev, author, size, date, rawName] = m;
+    const isDir = rawName.endsWith('/') || rawName === '.';
+    const name = isDir && rawName !== '.' ? rawName.slice(0, -1) : rawName;
+    entries.push({
+      name,
+      kind: isDir ? 'dir' : 'file',
+      revision: parseInt(rev, 10),
+      author,
+      size: size !== undefined ? parseInt(size, 10) : undefined,
+      date
+    });
+  }
+  return entries;
+}
+
+/**
+ * Format a duration in milliseconds to a human-readable string
  */
 export function formatDuration(milliseconds: number): string {
   if (milliseconds < 1000) {
@@ -361,36 +406,36 @@ export function formatDuration(milliseconds: number): string {
 }
 
 /**
- * Validar nombre de archivo/directorio
+ * Validate a file/directory name
  */
 export function validatePath(filePath: string): boolean {
-  // Verificar que no contenga caracteres prohibidos en Windows
-  // Pero permitir dos puntos en contextos válidos (drive letters en Windows)
-  
-  // Patrón para detectar rutas absolutas de Windows (C:, D:, etc.)
+  // Check that it does not contain characters forbidden on Windows
+  // but allow a colon in valid contexts (Windows drive letters)
+
+  // Pattern to detect Windows absolute paths (C:, D:, etc.)
   const windowsAbsolutePathPattern = /^[A-Za-z]:[\\\/]/;
-  
+
   if (windowsAbsolutePathPattern.test(filePath)) {
-    // Para rutas absolutas de Windows, verificar solo después del drive letter
-    const pathAfterDrive = filePath.substring(2); // Quitar "C:" o similar
+    // For Windows absolute paths, only validate the segment after the drive letter
+    const pathAfterDrive = filePath.substring(2); // Strip "C:" or similar
     const invalidChars = /[<>:"|?*]/;
     return !invalidChars.test(pathAfterDrive);
   } else {
-    // Para todas las demás rutas, aplicar validación completa
+    // For every other path, apply full validation
     const invalidChars = /[<>:"|?*]/;
     return !invalidChars.test(filePath);
   }
 }
 
 /**
- * Obtener rutas relativas desde el directorio de trabajo
+ * Get a relative path from the working directory
  */
 export function getRelativePath(fullPath: string, workingDirectory: string): string {
   return path.relative(workingDirectory, fullPath).replace(/\\/g, '/');
 }
 
 /**
- * Validar URL de repositorio SVN
+ * Validate an SVN repository URL
  */
 export function validateSvnUrl(url: string): boolean {
   const svnUrlPattern = /^(svn|https?|file):\/\/.+/i;
@@ -398,17 +443,17 @@ export function validateSvnUrl(url: string): boolean {
 }
 
 /**
- * Limpiar y normalizar salida de comando
+ * Clean and normalize command output
  */
 export function cleanOutput(output: string): string {
   return output
-    .replace(/\r\n/g, '\n')  // Normalizar line endings
-    .replace(/\r/g, '\n')    // Convertir CR a LF
+    .replace(/\r\n/g, '\n')  // Normalize line endings
+    .replace(/\r/g, '\n')    // Convert CR to LF
     .trim();
 }
 
 /**
- * Crear mensaje de error SVN más descriptivo
+ * Create a more descriptive SVN error message
  */
 export function createSvnError(message: string, command?: string, stderr?: string): SvnError {
   const error = new SvnError(message);
@@ -418,31 +463,31 @@ export function createSvnError(message: string, command?: string, stderr?: strin
 }
 
 /**
- * Limpiar cache de credenciales SVN para resolver errores E215004
+ * Clear the SVN credentials cache to resolve E215004 errors
  */
 export async function clearSvnCredentials(config: SvnConfig): Promise<SvnResponse> {
   try {
-    // En sistemas Unix/Linux, SVN guarda credenciales en ~/.subversion/auth
-    // En Windows, en %APPDATA%\Subversion\auth
-    // Intentar limpiar usando el comando auth específico si está disponible
-    
-    // Primero intentar con el comando de limpieza estándar
+    // On Unix/Linux systems, SVN stores credentials in ~/.subversion/auth
+    // On Windows, in %APPDATA%\Subversion\auth
+    // Attempt to clear using the dedicated auth command if available
+
+    // First try the standard cleanup command
     return await executeSvnCommand(config, ['auth', '--remove'], { noAuthCache: true });
   } catch (error: any) {
-    // Si el comando auth no está disponible, intentar alternativa
+    // If the auth command is unavailable, try a fallback
     try {
-      // Como fallback, usar un comando que no guarde credenciales
+      // Fallback: run a command that does not store credentials
       const response = await executeSvnCommand(config, ['info', '--non-interactive'], { noAuthCache: true });
       return {
         success: true,
-        data: 'Cache de credenciales limpiado (usando método alternativo)',
+        data: 'Credentials cache cleared (using alternative method)',
         command: 'clear-credentials',
         workingDirectory: config.workingDirectory!
       };
     } catch (fallbackError: any) {
       return {
         success: false,
-        error: `No se pudo limpiar el cache de credenciales: ${fallbackError.message}`,
+        error: `Could not clear credentials cache: ${fallbackError.message}`,
         command: 'clear-credentials',
         workingDirectory: config.workingDirectory!
       };

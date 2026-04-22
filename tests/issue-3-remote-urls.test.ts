@@ -1,7 +1,7 @@
 import { describe, it, expect } from '@jest/globals';
 import { SvnService } from '../tools/svn-service';
 
-describe('Issue #3 - Error en svn_info con URLs remotas', () => {
+describe('Issue #3 - Error in svn_info with remote URLs', () => {
   let svnService: SvnService;
 
   beforeEach(() => {

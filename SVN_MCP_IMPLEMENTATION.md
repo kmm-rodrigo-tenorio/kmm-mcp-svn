@@ -1,81 +1,81 @@
-# SVN MCP - Implementación por Etapas
+# SVN MCP - Staged Implementation
 
-## 🎯 Objetivo
-Crear un MCP (Model Context Protocol) completo para Subversion (SVN) que permita a agentes de IA:
-- Entender la estructura de ramas y repositorios
-- Ver cambios y historial
-- Realizar todas las operaciones SVN disponibles
-- Funcionar correctamente en entornos Windows
+## 🎯 Goal
+Build a complete MCP (Model Context Protocol) server for Subversion (SVN) that allows AI agents to:
+- Understand branch and repository structure
+- View changes and history
+- Perform every available SVN operation
+- Work correctly on Windows environments
 
-## 📋 Checklist de Implementación
+## 📋 Implementation Checklist
 
-### Etapa 1: Estructura Base del Proyecto ✅
-- [x] Crear estructura de directorios
-- [x] Configurar package.json
-- [x] Configurar TypeScript (tsconfig.json)
-- [x] Crear archivo de versión
-- [x] Configurar tipos básicos
-- [x] Crear utilidades para ejecutar comandos SVN
+### Stage 1: Project Base Structure ✅
+- [x] Create directory structure
+- [x] Set up package.json
+- [x] Set up TypeScript (tsconfig.json)
+- [x] Create version file
+- [x] Set up base types
+- [x] Create utilities to execute SVN commands
 
-### Etapa 2: Operaciones Básicas de Repositorio ✅
-- [x] **svn_info** - Obtener información del repositorio
-- [x] **svn_status** - Ver estado de archivos
-- [x] **svn_log** - Ver historial de commits
-- [x] **svn_diff** - Ver diferencias entre versiones
-- [x] **svn_checkout** - Clonar repositorio
-- [x] **svn_update** - Actualizar working copy
+### Stage 2: Basic Repository Operations ✅
+- [x] **svn_info** - Get repository information
+- [x] **svn_status** - Show file status
+- [x] **svn_log** - Show commit history
+- [x] **svn_diff** - Show differences between revisions
+- [x] **svn_checkout** - Clone repository
+- [x] **svn_update** - Update working copy
 
-### Etapa 3: Gestión de Archivos ✅
-- [x] **svn_add** - Añadir archivos al control de versiones
-- [x] **svn_delete** - Eliminar archivos
-- [ ] **svn_move** - Mover/renombrar archivos
-- [ ] **svn_copy** - Copiar archivos
-- [x] **svn_revert** - Revertir cambios
-- [x] **svn_commit** - Confirmar cambios
+### Stage 3: File Management ✅
+- [x] **svn_add** - Add files to version control
+- [x] **svn_delete** - Remove files
+- [ ] **svn_move** - Move/rename files
+- [ ] **svn_copy** - Copy files
+- [x] **svn_revert** - Revert changes
+- [x] **svn_commit** - Commit changes
 
-### Etapa 4: Gestión de Ramas (Branching) 🔄
-- [ ] **svn_branch_create** - Crear nueva rama
-- [ ] **svn_branch_list** - Listar ramas existentes
-- [ ] **svn_branch_switch** - Cambiar de rama
-- [ ] **svn_branch_merge** - Fusionar ramas
-- [ ] **svn_branch_delete** - Eliminar rama
+### Stage 4: Branch Management 🔄
+- [ ] **svn_branch_create** - Create a new branch
+- [ ] **svn_branch_list** - List existing branches
+- [ ] **svn_branch_switch** - Switch branches
+- [ ] **svn_branch_merge** - Merge branches
+- [ ] **svn_branch_delete** - Delete a branch
 
-### Etapa 5: Operaciones Avanzadas 🔄
-- [ ] **svn_resolve** - Resolver conflictos
-- [ ] **svn_import** - Importar proyecto
-- [ ] **svn_export** - Exportar sin metadatos
-- [ ] **svn_relocate** - Cambiar URL del repositorio
-- [ ] **svn_cleanup** - Limpiar working copy
-- [ ] **svn_lock** - Bloquear archivos
-- [ ] **svn_unlock** - Desbloquear archivos
+### Stage 5: Advanced Operations 🔄
+- [ ] **svn_resolve** - Resolve conflicts
+- [ ] **svn_import** - Import a project
+- [ ] **svn_export** - Export without metadata
+- [ ] **svn_relocate** - Change the repository URL
+- [ ] **svn_cleanup** - Clean up the working copy
+- [ ] **svn_lock** - Lock files
+- [ ] **svn_unlock** - Unlock files
 
-### Etapa 6: Análisis y Reporting 🔄
-- [ ] **svn_blame** - Ver quién modificó cada línea
-- [ ] **svn_list** - Listar contenido del repositorio
-- [ ] **svn_cat** - Ver contenido de archivo
-- [ ] **svn_propget** - Obtener propiedades
-- [ ] **svn_propset** - Establecer propiedades
-- [ ] **svn_propdel** - Eliminar propiedades
+### Stage 6: Analysis and Reporting 🔄
+- [ ] **svn_blame** - Show who modified each line
+- [ ] **svn_list** - List repository contents
+- [ ] **svn_cat** - Show file contents
+- [ ] **svn_propget** - Get properties
+- [ ] **svn_propset** - Set properties
+- [ ] **svn_propdel** - Delete properties
 
-### Etapa 7: Herramientas de Productividad 🔄
-- [ ] **svn_working_copy_summary** - Resumen completo del working copy
-- [ ] **svn_branch_comparison** - Comparar ramas
-- [ ] **svn_conflict_detector** - Detectar conflictos potenciales
-- [ ] **svn_health_check** - Verificar estado del repositorio
-- [ ] **svn_batch_operations** - Operaciones en lote
+### Stage 7: Productivity Tools 🔄
+- [ ] **svn_working_copy_summary** - Complete working copy summary
+- [ ] **svn_branch_comparison** - Compare branches
+- [ ] **svn_conflict_detector** - Detect potential conflicts
+- [ ] **svn_health_check** - Check repository health
+- [ ] **svn_batch_operations** - Batch operations
 
-### Etapa 8: Testing y Optimización 🔄
-- [ ] Crear tests unitarios
-- [ ] Manejo de errores robusto
-- [ ] Optimización de rendimiento
-- [ ] Documentación completa
-- [ ] Validación en Windows
+### Stage 8: Testing and Optimization 🔄
+- [ ] Create unit tests
+- [ ] Robust error handling
+- [ ] Performance optimization
+- [ ] Complete documentation
+- [ ] Validation on Windows
 
 ---
 
-## 🛠️ Comandos SVN a Implementar
+## 🛠️ SVN Commands to Implement
 
-### Comandos Básicos
+### Basic Commands
 ```bash
 svn checkout (co)     # Checkout working copy
 svn update (up)       # Update working copy
@@ -88,7 +88,7 @@ svn log               # Show log messages
 svn diff (di)         # Show differences
 ```
 
-### Comandos de Archivos
+### File Commands
 ```bash
 svn copy (cp)         # Copy files/directories
 svn move (mv/rename)  # Move/rename files
@@ -98,7 +98,7 @@ svn cat               # Output file contents
 svn list (ls)         # List directory entries
 ```
 
-### Comandos de Ramas
+### Branch Commands
 ```bash
 svn switch (sw)       # Switch working copy to different URL
 svn merge             # Merge changes
@@ -106,7 +106,7 @@ svn import            # Import files into repository
 svn export            # Export clean directory tree
 ```
 
-### Comandos de Propiedades
+### Property Commands
 ```bash
 svn propget (pget/pg) # Get property value
 svn propset (pset/ps) # Set property value
@@ -114,7 +114,7 @@ svn propdel (pdel/pd) # Delete property
 svn proplist (plist/pl) # List properties
 ```
 
-### Comandos de Administración
+### Administration Commands
 ```bash
 svn cleanup           # Clean up working copy
 svn relocate          # Relocate working copy
@@ -125,9 +125,9 @@ svn blame (praise/annotate) # Show file annotations
 
 ---
 
-## 🔧 Implementación Técnica
+## 🔧 Technical Implementation
 
-### Estructura de Archivos
+### File Structure
 ```
 svn-mcp/
 ├── package.json
@@ -147,85 +147,85 @@ svn-mcp/
 └── README.md
 ```
 
-### Consideraciones para Windows
-- Usar `child_process.spawn()` con `shell: true`
-- Manejar rutas con `path.resolve()` y `path.normalize()`
-- Escapar argumentos correctamente
-- Detectar si SVN está instalado y disponible en PATH
-- Manejar encoding de caracteres especiales
+### Windows Considerations
+- Use `child_process.spawn()` with `shell: true`
+- Handle paths with `path.resolve()` and `path.normalize()`
+- Escape arguments correctly
+- Detect whether SVN is installed and available on PATH
+- Handle encoding of special characters
 
-### Manejo de Errores
-- Capturar stderr de comandos SVN
-- Parsear códigos de error específicos
-- Proporcionar mensajes de error claros
-- Manejar timeouts de operaciones largas
-
----
-
-## 📊 Progreso Actual
-
-**Completado:** 14/40 tareas (35%)
-
-**Etapa Actual:** Operaciones Básicas de Repositorio ✅
-
-**Próxima Etapa:** Gestión de Archivos
-
-### ✅ Completado Recientemente:
-- [x] Estructura base del proyecto
-- [x] Configuración de TypeScript y Jest
-- [x] **svn_health_check** - Verificar sistema SVN
-- [x] **svn_info** - Obtener información del repositorio
-- [x] **svn_status** - Ver estado de archivos
-- [x] **svn_log** - Ver historial de commits
-- [x] **svn_diff** - Ver diferencias entre versiones
-- [x] **svn_checkout** - Clonar repositorio
-- [x] **svn_update** - Actualizar working copy
-- [x] **svn_add** - Añadir archivos al control de versiones
-- [x] **svn_commit** - Confirmar cambios
-- [x] **svn_delete** - Eliminar archivos
-- [x] **svn_revert** - Revertir cambios
-- [x] **svn_cleanup** - Limpiar working copy
+### Error Handling
+- Capture stderr from SVN commands
+- Parse specific error codes
+- Provide clear error messages
+- Handle timeouts of long-running operations
 
 ---
 
-## 🚀 Comandos de Desarrollo
+## 📊 Current Progress
+
+**Completed:** 14/40 tasks (35%)
+
+**Current Stage:** Basic Repository Operations ✅
+
+**Next Stage:** File Management
+
+### ✅ Recently Completed:
+- [x] Project base structure
+- [x] TypeScript and Jest setup
+- [x] **svn_health_check** - Check SVN system
+- [x] **svn_info** - Get repository information
+- [x] **svn_status** - Show file status
+- [x] **svn_log** - Show commit history
+- [x] **svn_diff** - Show differences between revisions
+- [x] **svn_checkout** - Clone repository
+- [x] **svn_update** - Update working copy
+- [x] **svn_add** - Add files to version control
+- [x] **svn_commit** - Commit changes
+- [x] **svn_delete** - Remove files
+- [x] **svn_revert** - Revert changes
+- [x] **svn_cleanup** - Clean up working copy
+
+---
+
+## 🚀 Development Commands
 
 ```bash
-# Instalar dependencias
+# Install dependencies
 npm install
 
-# Compilar TypeScript
+# Build TypeScript
 npm run build
 
-# Ejecutar en modo desarrollo
+# Run in development mode
 npm run dev
 
-# Ejecutar tests
+# Run tests
 npm test
 
-# Compilar y publicar
+# Build and publish
 npm run release
 ```
 
 ---
 
-## 📝 Notas de Implementación
+## 📝 Implementation Notes
 
-### Comando Base SVN
-Todos los comandos utilizarán la estructura:
+### Base SVN Command
+Every command uses the structure:
 ```typescript
 svn [command] [options] [arguments]
 ```
 
-### Formato de Respuesta
-Todas las herramientas devolverán JSON estructurado con:
+### Response Format
+All tools return structured JSON with:
 - `success`: boolean
-- `data`: resultado del comando
-- `error`: mensaje de error si aplica
-- `command`: comando ejecutado
-- `workingDirectory`: directorio de trabajo
+- `data`: command result
+- `error`: error message if applicable
+- `command`: executed command
+- `workingDirectory`: working directory
 
-### Autenticación
-- Soporte para credenciales mediante variables de entorno
-- Manejo de autenticación por certificados
-- Cache de credenciales cuando sea posible 
+### Authentication
+- Support for credentials via environment variables
+- Support for certificate-based authentication
+- Credentials cache when possible

@@ -9,6 +9,9 @@ import {
   SvnCommitOptions,
   SvnAddOptions,
   SvnDeleteOptions,
+  SvnCatOptions,
+  SvnListOptions,
+  SvnListEntry,
   SvnError
 } from '../common/types.js';
 
@@ -18,6 +21,7 @@ import {
   parseInfoOutput,
   parseStatusOutput,
   parseLogOutput,
+  parseListOutput,
   validateSvnInstallation,
   isWorkingCopy,
   normalizePath,
@@ -36,32 +40,32 @@ export class SvnService {
   }
 
   /**
-   * Función auxiliar para manejar errores comunes de SVN
+   * Helper function to handle common SVN errors
    */
   private handleSvnError(error: any, operation: string): never {
     let message = `Failed to ${operation}`;
-    
+
     if (error.message.includes('E155007') || error.message.includes('not a working copy')) {
-      message = `El directorio '${this.config.workingDirectory}' no es un working copy de SVN. Asegúrate de estar en un directorio que contenga un repositorio SVN o hacer checkout primero.`;
+      message = `The directory '${this.config.workingDirectory}' is not an SVN working copy. Make sure you are in a directory that contains an SVN repository or run checkout first.`;
     } else if (error.message.includes('E175002') || error.message.includes('Unable to connect')) {
-      message = `No se puede conectar al repositorio SVN. Verifica tu conexión a internet y las credenciales.`;
+      message = `Cannot connect to the SVN repository. Check your internet connection and credentials.`;
     } else if (error.message.includes('E170001') || error.message.includes('Authentication failed')) {
-      message = `Error de autenticación. Verifica tu nombre de usuario y contraseña SVN.`;
+      message = `Authentication error. Check your SVN username and password.`;
     } else if (error.message.includes('E155036') || error.message.includes('working copy locked')) {
-      message = `El working copy está bloqueado. Ejecuta 'svn cleanup' para resolverlo.`;
+      message = `The working copy is locked. Run 'svn cleanup' to resolve it.`;
     } else if (error.message.includes('E200030') || error.message.includes('sqlite')) {
-      message = `Error en la base de datos del working copy. Ejecuta 'svn cleanup' para repararlo.`;
+      message = `Working copy database error. Run 'svn cleanup' to repair it.`;
     } else if (error.stderr && error.stderr.length > 0) {
       message = `${message}: ${error.stderr}`;
     } else {
       message = `${message}: ${error.message}`;
     }
-    
+
     throw new SvnError(message);
   }
 
   /**
-   * Verificar que SVN está disponible y configurado correctamente
+   * Verify that SVN is available and correctly configured
    */
   async healthCheck(): Promise<SvnResponse<{
     svnAvailable: boolean;
@@ -70,7 +74,7 @@ export class SvnService {
     repositoryAccessible?: boolean;
   }>> {
     try {
-      // Verificar instalación de SVN
+      // Verify SVN installation
       const svnAvailable = await validateSvnInstallation(this.config);
       if (!svnAvailable) {
         return {
@@ -81,11 +85,11 @@ export class SvnService {
         };
       }
 
-      // Obtener versión de SVN
+      // Get SVN version
       const versionResponse = await executeSvnCommand(this.config, ['--version', '--quiet']);
       const version = versionResponse.data as string;
 
-      // Verificar si estamos en un working copy
+      // Check whether we are inside a working copy
       const workingCopyValid = await isWorkingCopy(this.config.workingDirectory!);
 
       let repositoryAccessible = false;
@@ -121,7 +125,7 @@ export class SvnService {
   }
 
   /**
-   * Obtener información del working copy o directorio específico
+   * Get information about the working copy or a specific directory
    */
   async getInfo(path?: string): Promise<SvnResponse<SvnInfo>> {
     try {
@@ -156,7 +160,7 @@ export class SvnService {
   }
 
   /**
-   * Obtener estado de archivos en el working copy
+   * Get the status of files in the working copy
    */
   async getStatus(path?: string, showAll: boolean = false): Promise<SvnResponse<SvnStatus[]>> {
     try {
@@ -170,14 +174,14 @@ export class SvnService {
       }
 
       let response;
-      
-      // Si showAll es true, intentar primero con --show-updates
+
+      // If showAll is true, try first with --show-updates
       if (showAll) {
         try {
           const argsWithUpdates = [...args, '--show-updates'];
           response = await executeSvnCommand(this.config, argsWithUpdates);
         } catch (error: any) {
-          // Si falla con --show-updates, intentar sin él
+          // If --show-updates fails, fall back to local status only
           console.warn(`Warning: --show-updates failed, falling back to local status only: ${error.message}`);
           response = await executeSvnCommand(this.config, args);
         }
@@ -201,7 +205,7 @@ export class SvnService {
   }
 
   /**
-   * Obtener historial de cambios (log)
+   * Get change history (log)
    */
   async getLog(
     path?: string, 
@@ -230,42 +234,39 @@ export class SvnService {
       try {
         response = await executeSvnCommand(this.config, args);
       } catch (error: any) {
-        // Detectar si SVN no está instalado
+        // Detect if SVN is not installed
         if ((error.message.includes('spawn') && error.message.includes('ENOENT')) ||
             error.code === 127) {
           const enhancedError = new SvnError(
-            'SVN no está instalado o no se encuentra en el PATH del sistema. Instala Subversion para usar este comando.'
+            'SVN is not installed or not found in the system PATH. Install Subversion to use this command.'
           );
           enhancedError.command = error.command;
           enhancedError.code = error.code;
           throw enhancedError;
         }
-        
-        // Detectar errores de red/conectividad y proporcionar mensajes más útiles
-        if (error.message.includes('E175002') || 
+
+        // Detect network/connectivity errors and surface more helpful messages
+        if (error.message.includes('E175002') ||
             error.message.includes('Unable to connect') ||
             error.message.includes('Connection refused') ||
             error.message.includes('Network is unreachable') ||
             error.code === 1) {
-          
-          // Intentar con opciones que funcionen sin conectividad remota si es posible
-          console.warn(`Log remoto falló, posible problema de conectividad: ${error.message}`);
-          
-          // Para comandos log, podemos intentar usar --offline si está disponible, 
-          // o proporcionar una respuesta vacía con información útil
+
+          console.warn(`Remote log failed, possible connectivity issue: ${error.message}`);
+
           const enhancedError = new SvnError(
-            `No se pudo obtener el historial de cambios. Posibles causas:
-            - Sin conectividad al servidor SVN
-            - Credenciales requeridas pero no proporcionadas
-            - Servidor SVN temporalmente inaccesible
-            - Working copy no sincronizado con el repositorio remoto`
+            `Could not retrieve change history. Possible causes:
+            - No connectivity to the SVN server
+            - Credentials required but not provided
+            - SVN server temporarily unreachable
+            - Working copy out of sync with the remote repository`
           );
           enhancedError.command = error.command;
           enhancedError.stderr = error.stderr;
           enhancedError.code = error.code;
           throw enhancedError;
         }
-        // Re-lanzar otros errores sin modificar
+        // Re-throw any other error unchanged
         throw error;
       }
 
@@ -285,7 +286,7 @@ export class SvnService {
   }
 
   /**
-   * Obtener diferencias entre versiones
+   * Get differences between revisions
    */
   async getDiff(
     path?: string,
@@ -326,7 +327,7 @@ export class SvnService {
   }
 
   /**
-   * Checkout de un repositorio
+   * Check out a repository
    */
   async checkout(
     url: string,
@@ -381,7 +382,7 @@ export class SvnService {
   }
 
   /**
-   * Actualizar working copy
+   * Update the working copy
    */
   async update(
     path?: string,
@@ -429,7 +430,7 @@ export class SvnService {
   }
 
   /**
-   * Añadir archivos al control de versiones
+   * Add files to version control
    */
   async add(
     paths: string | string[],
@@ -438,7 +439,7 @@ export class SvnService {
     try {
       const pathArray = Array.isArray(paths) ? paths : [paths];
       
-      // Validar todas las rutas
+      // Validate all paths
       for (const path of pathArray) {
         if (!validatePath(path)) {
           throw new SvnError(`Invalid path: ${path}`);
@@ -467,7 +468,7 @@ export class SvnService {
         args.push('--parents');
       }
 
-      // Añadir rutas normalizadas
+      // Append normalized paths
       args.push(...pathArray.map(p => normalizePath(p)));
 
       const response = await executeSvnCommand(this.config, args);
@@ -486,7 +487,7 @@ export class SvnService {
   }
 
   /**
-   * Confirmar cambios al repositorio
+   * Commit changes to the repository
    */
   async commit(
     options: SvnCommitOptions,
@@ -519,7 +520,7 @@ export class SvnService {
         args.push('--no-unlock');
       }
 
-      // Añadir rutas específicas si se proporcionan
+      // Append specific paths when provided
       if (paths && paths.length > 0) {
         for (const path of paths) {
           if (!validatePath(path)) {
@@ -547,7 +548,7 @@ export class SvnService {
   }
 
   /**
-   * Eliminar archivos del control de versiones
+   * Remove files from version control
    */
   async delete(
     paths: string | string[],
@@ -556,7 +557,7 @@ export class SvnService {
     try {
       const pathArray = Array.isArray(paths) ? paths : [paths];
       
-      // Validar todas las rutas
+      // Validate all paths
       for (const path of pathArray) {
         if (!validatePath(path)) {
           throw new SvnError(`Invalid path: ${path}`);
@@ -577,7 +578,7 @@ export class SvnService {
         args.push('--message', options.message);
       }
 
-      // Añadir rutas normalizadas
+      // Append normalized paths
       args.push(...pathArray.map(p => normalizePath(p)));
 
       const response = await executeSvnCommand(this.config, args);
@@ -596,13 +597,13 @@ export class SvnService {
   }
 
   /**
-   * Revertir cambios locales
+   * Revert local changes
    */
   async revert(paths: string | string[]): Promise<SvnResponse<string>> {
     try {
       const pathArray = Array.isArray(paths) ? paths : [paths];
       
-      // Validar todas las rutas
+      // Validate all paths
       for (const path of pathArray) {
         if (!validatePath(path)) {
           throw new SvnError(`Invalid path: ${path}`);
@@ -611,7 +612,7 @@ export class SvnService {
 
       const args = ['revert'];
       
-      // Añadir rutas normalizadas
+      // Append normalized paths
       args.push(...pathArray.map(p => normalizePath(p)));
 
       const response = await executeSvnCommand(this.config, args);
@@ -630,7 +631,7 @@ export class SvnService {
   }
 
   /**
-   * Limpiar working copy
+   * Clean up the working copy
    */
   async cleanup(path?: string): Promise<SvnResponse<string>> {
     try {
@@ -659,7 +660,7 @@ export class SvnService {
   }
 
   /**
-   * Diagnóstico específico para comandos problemáticos
+   * Targeted diagnostics for problematic commands
    */
   async diagnoseCommands(): Promise<SvnResponse<{
     statusLocal: boolean;
@@ -679,45 +680,45 @@ export class SvnService {
     };
 
     try {
-      // Probar svn status local
+      // Test local svn status
       try {
         await executeSvnCommand(this.config, ['status']);
         results.statusLocal = true;
       } catch (error: any) {
-        const errorMsg = this.categorizeError(error, 'status local');
+        const errorMsg = this.categorizeError(error, 'local status');
         results.errors.push(errorMsg.message);
         if (errorMsg.suggestion) {
           results.suggestions.push(errorMsg.suggestion);
         }
       }
 
-      // Probar svn status con --show-updates
+      // Test svn status with --show-updates
       try {
         await executeSvnCommand(this.config, ['status', '--show-updates']);
         results.statusRemote = true;
       } catch (error: any) {
-        const errorMsg = this.categorizeError(error, 'status remoto');
+        const errorMsg = this.categorizeError(error, 'remote status');
         results.errors.push(errorMsg.message);
         if (errorMsg.suggestion) {
           results.suggestions.push(errorMsg.suggestion);
         }
       }
 
-      // Probar svn log básico
+      // Test basic svn log
       try {
         await executeSvnCommand(this.config, ['log', '--limit', '1']);
         results.logBasic = true;
       } catch (error: any) {
-        const errorMsg = this.categorizeError(error, 'log básico');
+        const errorMsg = this.categorizeError(error, 'basic log');
         results.errors.push(errorMsg.message);
         if (errorMsg.suggestion) {
           results.suggestions.push(errorMsg.suggestion);
         }
       }
 
-      // Agregar sugerencias generales basadas en los resultados
+      // Add general suggestions based on the results
       if (!results.statusRemote && !results.logBasic && results.statusLocal) {
-        results.suggestions.push('Los comandos remotos fallan pero el local funciona. Revisa la conectividad de red y credenciales SVN.');
+        results.suggestions.push('Remote commands fail but the local one works. Review network connectivity and SVN credentials.');
       }
 
       return {
@@ -728,7 +729,7 @@ export class SvnService {
       };
 
     } catch (error: any) {
-      results.errors.push(`Error general: ${error.message}`);
+      results.errors.push(`General error: ${error.message}`);
       return {
         success: false,
         data: results,
@@ -740,78 +741,78 @@ export class SvnService {
   }
 
   /**
-   * Categorizar errores y proporcionar sugerencias específicas
+   * Categorize errors and provide specific suggestions
    */
   private categorizeError(error: any, commandType: string): { message: string; suggestion?: string } {
-    const baseMessage = `${commandType} falló`;
-    
-    // SVN no encontrado en el sistema
+    const baseMessage = `${commandType} failed`;
+
+    // SVN not found in the system
     if ((error.message.includes('spawn') && error.message.includes('ENOENT')) ||
         error.code === 127) {
       return {
-        message: `${baseMessage}: SVN no está instalado o no se encuentra en el PATH`,
-        suggestion: 'Instala SVN (subversion) o verifica que esté en el PATH del sistema'
+        message: `${baseMessage}: SVN is not installed or not found in PATH`,
+        suggestion: 'Install SVN (subversion) or make sure it is available in the system PATH'
       };
     }
-    
-    // Errores de conectividad
-    if (error.message.includes('E175002') || 
+
+    // Connectivity errors
+    if (error.message.includes('E175002') ||
         error.message.includes('Unable to connect') ||
         error.message.includes('Connection refused') ||
         error.message.includes('Network is unreachable')) {
       return {
-        message: `${baseMessage}: Sin conectividad al servidor SVN`,
-        suggestion: 'Verifica tu conexión a internet y que el servidor SVN esté accesible'
+        message: `${baseMessage}: No connectivity to the SVN server`,
+        suggestion: 'Check your internet connection and that the SVN server is reachable'
       };
     }
-    
-    // Errores de autenticación - demasiados intentos
-    if (error.message.includes('E215004') || 
+
+    // Authentication errors - too many attempts
+    if (error.message.includes('E215004') ||
         error.message.includes('No more credentials') ||
         error.message.includes('we tried too many times')) {
       return {
-        message: `${baseMessage}: Demasiados intentos de autenticación fallidos`,
-        suggestion: 'Las credenciales pueden estar incorrectas o cachadas. Limpia el cache de credenciales SVN y verifica SVN_USERNAME y SVN_PASSWORD'
+        message: `${baseMessage}: Too many failed authentication attempts`,
+        suggestion: 'Credentials may be incorrect or cached. Clear the SVN credentials cache and verify SVN_USERNAME and SVN_PASSWORD'
       };
     }
-    
-    // Errores de autenticación generales
-    if (error.message.includes('E170001') || 
+
+    // General authentication errors
+    if (error.message.includes('E170001') ||
         error.message.includes('Authentication failed') ||
         error.message.includes('authorization failed')) {
       return {
-        message: `${baseMessage}: Error de autenticación`,
-        suggestion: 'Verifica tus credenciales SVN (SVN_USERNAME y SVN_PASSWORD)'
+        message: `${baseMessage}: Authentication error`,
+        suggestion: 'Verify your SVN credentials (SVN_USERNAME and SVN_PASSWORD)'
       };
     }
-    
-    // Working copy no válido
-    if (error.message.includes('E155007') || 
+
+    // Invalid working copy
+    if (error.message.includes('E155007') ||
         error.message.includes('not a working copy')) {
       return {
-        message: `${baseMessage}: No es un working copy válido`,
-        suggestion: 'Asegúrate de estar en un directorio con checkout de SVN o ejecuta svn checkout primero'
+        message: `${baseMessage}: Not a valid working copy`,
+        suggestion: 'Make sure you are in an SVN checkout directory or run svn checkout first'
       };
     }
-    
-    // Working copy bloqueado
-    if (error.message.includes('E155036') || 
+
+    // Working copy locked
+    if (error.message.includes('E155036') ||
         error.message.includes('working copy locked')) {
       return {
-        message: `${baseMessage}: Working copy bloqueado`,
-        suggestion: 'Ejecuta "svn cleanup" para desbloquear el working copy'
+        message: `${baseMessage}: Working copy locked`,
+        suggestion: 'Run "svn cleanup" to unlock the working copy'
       };
     }
-    
-    // Error genérico con código 1 (frecuente en comandos remotos)
+
+    // Generic exit code 1 (common with remote commands)
     if (error.code === 1) {
       return {
-        message: `${baseMessage}: Comando falló con código 1 (posible problema de red/autenticación)`,
-        suggestion: 'Revisa conectividad de red, credenciales SVN, y que el repositorio sea accesible'
+        message: `${baseMessage}: Command failed with exit code 1 (possible network/authentication issue)`,
+        suggestion: 'Check network connectivity, SVN credentials, and that the repository is reachable'
       };
     }
-    
-    // Error genérico
+
+    // Fallback
     return {
       message: `${baseMessage}: ${error.message}`,
       suggestion: undefined
@@ -819,9 +820,104 @@ export class SvnService {
   }
 
   /**
-   * Limpiar cache de credenciales SVN para resolver errores de autenticación
+   * Clear the SVN credentials cache to resolve authentication errors
    */
   async clearCredentials(): Promise<SvnResponse> {
     return await clearSvnCredentials(this.config);
+  }
+
+  /**
+   * Show the contents of a versioned file (svn cat).
+   * Accepts a local path or a repository URL.
+   */
+  async cat(target: string, options: SvnCatOptions = {}): Promise<SvnResponse<string>> {
+    try {
+      if (!target || typeof target !== 'string') {
+        throw new SvnError('Target path or URL is required for svn cat');
+      }
+
+      const args = ['cat'];
+
+      if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
+        args.push('--revision', String(options.revision));
+      }
+
+      if (validateSvnUrl(target)) {
+        args.push(target);
+      } else if (validatePath(target)) {
+        args.push(normalizePath(target));
+      } else {
+        throw new SvnError(`Invalid path or URL: ${target}`);
+      }
+
+      const response = await executeSvnCommand(this.config, args);
+
+      return {
+        success: true,
+        data: cleanOutput(response.data as string),
+        command: response.command,
+        workingDirectory: response.workingDirectory,
+        executionTime: response.executionTime
+      };
+
+    } catch (error: any) {
+      this.handleSvnError(error, 'get file contents (svn cat)');
+    }
+  }
+
+  /**
+   * List entries of a versioned directory (svn list).
+   * Accepts a local path or a repository URL. If no target is given, the working copy is used.
+   */
+  async list(
+    target?: string,
+    options: SvnListOptions = {}
+  ): Promise<SvnResponse<{ entries: SvnListEntry[]; raw: string }>> {
+    try {
+      const args = ['list'];
+
+      if (options.verbose) {
+        args.push('--verbose');
+      }
+
+      if (options.depth) {
+        args.push('--depth', options.depth);
+      } else if (options.recursive) {
+        args.push('--recursive');
+      }
+
+      if (options.includeExternals) {
+        args.push('--include-externals');
+      }
+
+      if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
+        args.push('--revision', String(options.revision));
+      }
+
+      if (target) {
+        if (validateSvnUrl(target)) {
+          args.push(target);
+        } else if (validatePath(target)) {
+          args.push(normalizePath(target));
+        } else {
+          throw new SvnError(`Invalid path or URL: ${target}`);
+        }
+      }
+
+      const response = await executeSvnCommand(this.config, args);
+      const raw = cleanOutput(response.data as string);
+      const entries = parseListOutput(raw, !!options.verbose);
+
+      return {
+        success: true,
+        data: { entries, raw },
+        command: response.command,
+        workingDirectory: response.workingDirectory,
+        executionTime: response.executionTime
+      };
+
+    } catch (error: any) {
+      this.handleSvnError(error, 'list directory (svn list)');
+    }
   }
 } 

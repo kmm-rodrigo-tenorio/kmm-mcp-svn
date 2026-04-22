@@ -1,27 +1,27 @@
 @echo off
 echo Starting SVN MCP Server...
 
-REM Verificar si Node.js está disponible
+REM Check whether Node.js is available
 node --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Error: Node.js no está instalado o no está en PATH
+    echo Error: Node.js is not installed or not in PATH
     pause
     exit /b 1
 )
 
-REM Verificar si el proyecto está compilado
+REM Check whether the project has been built
 if not exist "dist\index.js" (
-    echo Compilando el proyecto...
+    echo Building the project...
     npm run build
     if %errorlevel% neq 0 (
-        echo Error: Falló la compilación
+        echo Error: Build failed
         pause
         exit /b 1
     )
 )
 
-REM Ejecutar el servidor MCP
-echo Ejecutando SVN MCP Server...
+REM Run the MCP server
+echo Running SVN MCP Server...
 node dist\index.js
 
-pause 
+pause

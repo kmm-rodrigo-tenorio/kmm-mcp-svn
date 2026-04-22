@@ -23,9 +23,9 @@ describe('E215004 Authentication Error Handling', () => {
       const service = svnService as any;
       const result = service.categorizeError(mockError, 'test command');
 
-      expect(result.message).toContain('Demasiados intentos de autenticación fallidos');
-      expect(result.suggestion).toContain('Limpia el cache de credenciales SVN');
-      expect(result.suggestion).toContain('SVN_USERNAME y SVN_PASSWORD');
+      expect(result.message).toContain('Too many failed authentication attempts');
+      expect(result.suggestion).toContain('Clear the SVN credentials cache');
+      expect(result.suggestion).toContain('SVN_USERNAME and SVN_PASSWORD');
     });
 
     it('should detect "No more credentials" text and provide specific guidance', () => {
@@ -37,8 +37,8 @@ describe('E215004 Authentication Error Handling', () => {
       const service = svnService as any;
       const result = service.categorizeError(mockError, 'test command');
 
-      expect(result.message).toContain('Demasiados intentos de autenticación fallidos');
-      expect(result.suggestion).toContain('Limpia el cache de credenciales SVN');
+      expect(result.message).toContain('Too many failed authentication attempts');
+      expect(result.suggestion).toContain('Clear the SVN credentials cache');
     });
 
     it('should detect "we tried too many times" text and provide specific guidance', () => {
@@ -50,8 +50,8 @@ describe('E215004 Authentication Error Handling', () => {
       const service = svnService as any;
       const result = service.categorizeError(mockError, 'test command');
 
-      expect(result.message).toContain('Demasiados intentos de autenticación fallidos');
-      expect(result.suggestion).toContain('Limpia el cache de credenciales SVN');
+      expect(result.message).toContain('Too many failed authentication attempts');
+      expect(result.suggestion).toContain('Clear the SVN credentials cache');
     });
 
     it('should still handle generic authentication errors', () => {
@@ -63,9 +63,9 @@ describe('E215004 Authentication Error Handling', () => {
       const service = svnService as any;
       const result = service.categorizeError(mockError, 'test command');
 
-      expect(result.message).toContain('Error de autenticación');
-      expect(result.suggestion).toContain('Verifica tus credenciales SVN');
-      expect(result.suggestion).not.toContain('Limpia el cache');
+      expect(result.message).toContain('Authentication error');
+      expect(result.suggestion).toContain('Verify your SVN credentials');
+      expect(result.suggestion).not.toContain('Clear the SVN credentials cache');
     });
   });
 
