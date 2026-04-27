@@ -128,19 +128,22 @@ export async function executeSvnCommand(
   const command = `${config.svnPath} ${finalArgs.join(' ')}`;
   
   return new Promise((resolve, reject) => {
-    // On Windows, shell: true makes Node look up the shell via
-    // `process.env.comspec || 'cmd.exe'`. If Claude Desktop/Code has
-    // sanitized the env, comspec may be unset and bare 'cmd.exe' won't
-    // resolve without System32 on PATH, giving "spawn cmd.exe ENOENT".
+    // We avoid `shell: true` on Windows for two reasons:
+    //   1. Node's shell handling for cmd.exe sets
+    //      windowsVerbatimArguments=true and joins argv with single
+    //      spaces — destroying any argument that contains a space (e.g.
+    //      paths under "Program Files" or repos with spaces in folder
+    //      names). libuv's direct CreateProcess path quotes each argv
+    //      element correctly.
+    //   2. shell:true depends on cmd.exe being resolvable from the
+    //      parent env, which Claude Desktop/Code sometimes sanitizes.
     //
-    // Fix: pass an ABSOLUTE cmd.exe path to `options.shell`. When
-    // `options.shell` is a string, Node skips the env lookup entirely
-    // and still recognises cmd.exe (via name regex) so it uses the
-    // correct `/d /s /c` switches.
-    //
-    // We still augment the child env so cmd.exe itself can locate svn
-    // and friends when spawning the command line.
+    // The only case we still need a shell is when SVN_PATH points at a
+    // .bat/.cmd shim — Node forbids spawning those directly since
+    // 18.20/20.12 (CVE-2024-27980). For that we go through cmd.exe and
+    // pre-escape each arg ourselves so the shell re-parses correctly.
     const isWindows = process.platform === 'win32';
+    const isBatchShim = isWindows && /\.(bat|cmd)$/i.test(config.svnPath || '');
     const systemRoot = process.env.SystemRoot || process.env.systemroot || 'C:\\Windows';
     const system32 = `${systemRoot}\\System32`;
     const cmdPath = process.env.ComSpec || process.env.comspec || `${system32}\\cmd.exe`;
@@ -183,15 +186,19 @@ export async function executeSvnCommand(
 
     const spawnOptions: SpawnOptions = {
       cwd: resolvedCwd,
-      // Absolute cmd.exe path on Windows so Node doesn't consult the
-      // (possibly sanitized) parent env to locate the shell.
-      shell: isWindows ? cmdPath : true,
+      // Direct spawn (no shell) lets libuv quote argv per element. The
+      // batch-shim case is the only one that has to take the cmd.exe
+      // detour, with manual arg escaping below.
+      shell: isBatchShim ? cmdPath : false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv
     };
-    
-    const childProcess = spawn(config.svnPath!, finalArgs, spawnOptions);
+
+    // Only pre-escape when we're going through a shell — direct spawn
+    // does its own quoting and would double-escape if we did it too.
+    const argsForSpawn = isBatchShim ? finalArgs.map(escapeArgument) : finalArgs;
+    const childProcess = spawn(config.svnPath!, argsForSpawn, spawnOptions);
     
     let stdout = '';
     let stderr = '';
