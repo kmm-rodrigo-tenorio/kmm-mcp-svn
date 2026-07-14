@@ -1,7 +1,7 @@
 {
   "name": "@grec0/mcp-svn",
   "version": "0.1.4",
-  "description": "MCP server para integración completa con Subversion (SVN)",
+  "description": "MCP server for full Subversion (SVN) integration",
   "license": "MIT",
   "author": "@grec0",
   "homepage": "https://github.com/gcorroto/mcp-svn",

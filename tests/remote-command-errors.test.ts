@@ -29,7 +29,7 @@ describe('Remote Command Error Handling', () => {
       
       // Check that errors contain more specific information
       const errorMessages = result.data.errors.join(' ');
-      expect(errorMessages).toContain('falló');
+      expect(errorMessages).toContain('failed');
       
       // Check that suggestions are provided
       expect(result.data.suggestions.length).toBeGreaterThan(0);
@@ -39,13 +39,13 @@ describe('Remote Command Error Handling', () => {
       const result = await svnService.diagnoseCommands();
       
       // Since SVN likely isn't installed in the test environment, we should get installation errors
-      const hasInstallationError = result.data.errors.some(error => 
-        error.includes('SVN no está instalado') || error.includes('no se encuentra en el PATH')
+      const hasInstallationError = result.data.errors.some(error =>
+        error.includes('SVN is not installed') || error.includes('not found in PATH')
       );
       expect(hasInstallationError).toBe(true);
-      
+
       const hasInstallationSuggestion = result.data.suggestions.some(suggestion =>
-        suggestion.includes('Instala SVN') || suggestion.includes('PATH')
+        suggestion.includes('Install SVN') || suggestion.includes('PATH')
       );
       expect(hasInstallationSuggestion).toBe(true);
     });
@@ -78,7 +78,7 @@ describe('Remote Command Error Handling', () => {
         expect(errorMessage.length).toBeGreaterThan(0);
         
         // Check if it's the enhanced SVN installation error
-        if (errorMessage.includes('SVN no está instalado')) {
+        if (errorMessage.includes('SVN is not installed')) {
           expect(errorMessage).toContain('PATH');
         }
       }
@@ -95,7 +95,7 @@ describe('Remote Command Error Handling', () => {
       
       // Each error should have corresponding details
       for (const error of result.data.errors) {
-        expect(error).toContain('falló');
+        expect(error).toContain('failed');
         expect(typeof error).toBe('string');
         expect(error.length).toBeGreaterThan(10);
       }
