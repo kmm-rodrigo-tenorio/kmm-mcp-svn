@@ -2,23 +2,23 @@
 
 A complete MCP (Model Context Protocol) server for Subversion (SVN) integration, designed to let AI agents manage SVN repositories efficiently.
 
-## 🎯 Features
+## ?? Features
 
-- ✅ **Basic repository operations**: info, status, log, diff, checkout, update
-- ✅ **File management**: add, commit, delete, revert
-- ✅ **Maintenance tools**: cleanup
-- 🔄 **Branch management**: (In development)
-- 🔄 **Advanced operations**: merge, switch, properties (In development)
-- 🔄 **Analysis tools**: blame, conflict detection (In development)
-- 🔄 **Batch operations**: (In development)
+- ? **Basic repository operations**: info, status, log, diff, checkout, update
+- ? **File management**: add, commit, delete, revert
+- ? **Maintenance tools**: cleanup
+- ?? **Branch management**: (In development)
+- ?? **Advanced operations**: merge, switch, properties (In development)
+- ?? **Analysis tools**: blame, conflict detection (In development)
+- ?? **Batch operations**: (In development)
 
-## 📋 Requirements
+## ?? Requirements
 
 - **Node.js** >= 18.0.0
 - **Subversion (SVN)** installed and available on PATH
 - **TypeScript** (for development)
 
-### 🔍 Detecting the SVN installation
+### ?? Detecting the SVN installation
 
 #### Check whether SVN is installed
 
@@ -46,7 +46,7 @@ see the NOTICE file for more information.
 Subversion is open source software, see http://subversion.apache.org/
 ```
 
-#### ❌ Common errors if SVN is NOT installed:
+#### ? Common errors if SVN is NOT installed:
 
 ```bash
 # Windows
@@ -57,7 +57,7 @@ svn: command not found
 bash: svn: command not found
 ```
 
-#### 🛠️ Advanced diagnostics
+#### ??? Advanced diagnostics
 
 ```bash
 # Check the system PATH
@@ -73,7 +73,7 @@ Get-ChildItem -Path C:\ -Name "svn.exe" -Recurse -ErrorAction SilentlyContinue  
 svn --version | head -1       # Get just the first line with the version
 ```
 
-### 💾 Installing SVN on Windows
+### ?? Installing SVN on Windows
 
 #### Option 1: Package managers
 
@@ -93,22 +93,22 @@ scoop install subversion
 1. **TortoiseSVN** (includes the command-line client):
    ```
    https://tortoisesvn.net/downloads.html
-   ✅ Includes GUI and CLI clients
-   ✅ Windows Explorer integration
+   ? Includes GUI and CLI clients
+   ? Windows Explorer integration
    ```
 
 2. **SlikSVN** (command line only):
    ```
    https://sliksvn.com/download/
-   ✅ Lightweight (CLI only)
-   ✅ Ideal for automation
+   ? Lightweight (CLI only)
+   ? Ideal for automation
    ```
 
 3. **CollabNet Subversion**:
    ```
    https://www.collab.net/downloads/subversion
-   ✅ Enterprise version
-   ✅ Commercial support available
+   ? Enterprise version
+   ? Commercial support available
    ```
 
 #### Option 3: Visual Studio or Git for Windows
@@ -121,7 +121,7 @@ git svn --version
 # Go to: Visual Studio Installer > Modify > Individual Components > Subversion
 ```
 
-### 🐧 Installing SVN on Linux
+### ?? Installing SVN on Linux
 
 ```bash
 # Ubuntu/Debian
@@ -139,7 +139,7 @@ sudo pacman -S subversion
 sudo apk add subversion
 ```
 
-### 🍎 Installing SVN on macOS
+### ?? Installing SVN on macOS
 
 ```bash
 # Homebrew (Recommended)
@@ -152,7 +152,7 @@ sudo port install subversion
 xcode-select --install
 ```
 
-### 🔧 Configuring SVN after installation
+### ?? Configuring SVN after installation
 
 #### Check the global configuration
 
@@ -179,7 +179,7 @@ svn list https://svn.example.com/repo/trunk
 svn list https://svn.example.com/repo/trunk --username user --password password
 ```
 
-## 🚀 Installation
+## ?? Installation
 
 ### From NPM
 
@@ -196,7 +196,7 @@ npm install
 npm run build
 ```
 
-## ⚙️ Configuration
+## ?? Configuration
 
 ### Environment Variables
 
@@ -209,11 +209,11 @@ npm run build
 | `SVN_PASSWORD` | Authentication password | - |
 | `SVN_TIMEOUT` | Timeout in milliseconds | `30000` |
 
-`SVN_WORKING_DIRECTORY` and `SVN_URL` are independent — set either or both. With both configured, local operations (`svn_status`, `svn_commit`, ...) run in the working copy, and URL-capable tools (`svn_cat`, `svn_list`, `svn_info`, `svn_log`, `svn_diff`) can be called with:
+`SVN_WORKING_DIRECTORY` and `SVN_URL` are independent ? set either or both. With both configured, local operations (`svn_status`, `svn_commit`, ...) run in the working copy, and URL-capable tools (`svn_cat`, `svn_list`, `svn_info`, `svn_log`, `svn_diff`) can be called with:
 
 - a full URL (`https://svn.example.com/repo/trunk/file.sql`)
-- a repo-relative path starting with `/` (`/trunk/file.sql`) — joined with `SVN_URL`
-- a local path — resolved against the working copy
+- a repo-relative path starting with `/` (`/trunk/file.sql`) ? joined with `SVN_URL`
+- a local path ? resolved against the working copy
 
 ### Example MCP Configuration
 
@@ -221,21 +221,23 @@ npm run build
 {
   "mcpServers": {
     "svn": {
-      "command": "npx",
-      "args": ["@grec0/mcp-svn"],
+      "command": "node",
+      "args": [
+        "C:/path/to/mcp/directory/dist/index.js"
+      ],
       "env": {
         "SVN_PATH": "svn",
+        "SVN_REPOSITORY_URL": "https://svn.kmm.com.br/producao",
         "SVN_WORKING_DIRECTORY": "C:/path/to/working/copy",
-        "SVN_URL": "https://svn.example.com/repo",
         "SVN_USERNAME": "your_username",
         "SVN_PASSWORD": "your_password"
       }
-    }
+    },
   }
 }
 ```
 
-## 🛠️ Available Tools
+## ??? Available Tools
 
 ### Basic Operations
 
@@ -361,7 +363,7 @@ Clean up the working copy from interrupted operations.
 svn_cleanup(path?: string)
 ```
 
-## 📖 Usage Examples
+## ?? Usage Examples
 
 ### Check the system status
 
@@ -416,7 +418,7 @@ await svn_commit(
 );
 ```
 
-## 🧪 Testing
+## ?? Testing
 
 ```bash
 # Run tests
@@ -429,7 +431,7 @@ npm run test -- --coverage
 npm run test -- --watch
 ```
 
-## 🏗️ Development
+## ??? Development
 
 ### Available scripts
 
@@ -459,26 +461,26 @@ npm run release:major
 
 ```
 svn-mcp/
-├── package.json
-├── tsconfig.json
-├── jest.config.js
-├── index.ts
-├── common/
-│   ├── types.ts      # TypeScript types
-│   ├── utils.ts      # SVN utilities
-│   └── version.ts    # Package version
-├── tools/
-│   └── svn-service.ts # Main SVN service
-├── tests/
-│   └── integration.test.ts # Integration tests
-└── README.md
+??? package.json
+??? tsconfig.json
+??? jest.config.js
+??? index.ts
+??? common/
+?   ??? types.ts      # TypeScript types
+?   ??? utils.ts      # SVN utilities
+?   ??? version.ts    # Package version
+??? tools/
+?   ??? svn-service.ts # Main SVN service
+??? tests/
+?   ??? integration.test.ts # Integration tests
+??? README.md
 ```
 
-## 📊 Development Status
+## ?? Development Status
 
 See the [SVN_MCP_IMPLEMENTATION.md](./SVN_MCP_IMPLEMENTATION.md) file for the full implementation checklist.
 
-**Current progress:** Stage 1 complete (Basic Operations) ✅
+**Current progress:** Stage 1 complete (Basic Operations) ?
 
 **Next stages:**
 - Branch management (branching)
@@ -486,7 +488,7 @@ See the [SVN_MCP_IMPLEMENTATION.md](./SVN_MCP_IMPLEMENTATION.md) file for the fu
 - Analysis tools
 - Batch operations
 
-## 🐛 Troubleshooting
+## ?? Troubleshooting
 
 ### SVN not found
 
@@ -520,11 +522,11 @@ Error: Command timeout after 30000ms
 
 **Solution:** Increase the value of `SVN_TIMEOUT`.
 
-## 📄 License
+## ?? License
 
 MIT License - see [LICENSE](LICENSE) for more details.
 
-## 🤝 Contributing
+## ?? Contributing
 
 1. Fork the project
 2. Create a feature branch (`git checkout -b feature/new-feature`)
@@ -532,7 +534,7 @@ MIT License - see [LICENSE](LICENSE) for more details.
 4. Push to the branch (`git push origin feature/new-feature`)
 5. Open a Pull Request
 
-## 📞 Support
+## ?? Support
 
 - **Issues:** [GitHub Issues](https://github.com/gcorroto/mcp-svn/issues)
 - **Documentation:** [Project Wiki](https://github.com/gcorroto/mcp-svn/wiki)

@@ -43,6 +43,7 @@ jenkins_live_reporter
 /libpeerconnection.log
 testem.log
 /typings
+/.claude
 
 # System files
 .DS_Store
