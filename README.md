@@ -207,7 +207,21 @@ npm run build
 | `SVN_URL` (alias: `SVN_REPOSITORY_URL`) | Repository URL. Enables URL-only workflows and `/trunk/...` target resolution | - |
 | `SVN_USERNAME` | Authentication user | - |
 | `SVN_PASSWORD` | Authentication password | - |
+| `SVN_USE_AUTH_CACHE` | Use svn's credential cache (`~/.subversion/auth`) instead of passing credentials on the command line | `false` |
 | `SVN_TIMEOUT` | Timeout in milliseconds | `30000` |
+
+### Credential handling
+
+The password is **never** included in any string this server returns. `SvnResponse.command`
+and every error message are built from a redacted copy of the argv (`--password ***`), so a
+secret cannot reach a transcript, a log, or an agent's context. The real credentials still go
+to the `svn` process unchanged, so authentication is unaffected.
+
+The command line itself remains a weaker boundary: on most systems any local process can read
+another process's argv. Where the credential cache is already populated, set
+`SVN_USE_AUTH_CACHE=true` so the credentials are left off the command line entirely. Commands
+that explicitly bypass the cache (`--no-auth-cache`, used to recover from `E215004`) still send
+them.
 
 `SVN_WORKING_DIRECTORY` and `SVN_URL` are independent — set either or both. With both configured, local operations (`svn_status`, `svn_commit`, ...) run in the working copy, and URL-capable tools (`svn_cat`, `svn_list`, `svn_info`, `svn_log`, `svn_diff`) can be called with:
 

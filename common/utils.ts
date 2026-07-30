@@ -89,19 +89,35 @@ export function escapeArgument(arg: string): string {
 }
 
 /**
+ * Whether to rely on svn's own credential cache (~/.subversion/auth) instead of
+ * passing credentials on the command line.
+ *
+ * Opt-in via SVN_USE_AUTH_CACHE=true. Worth turning on where the cache is
+ * already populated: a password in argv is readable by any process on the
+ * machine (ps / Process Explorer), which no amount of output redaction fixes.
+ * Ignored when the caller explicitly asked to bypass the cache.
+ */
+function useAuthCache(options: { noAuthCache?: boolean }): boolean {
+  if (options.noAuthCache) return false;
+  return /^(true|1)$/i.test(process.env.SVN_USE_AUTH_CACHE || '');
+}
+
+/**
  * Build authentication arguments
  */
 export function buildAuthArgs(config: SvnConfig, options: { noAuthCache?: boolean } = {}): string[] {
   const args: string[] = [];
-  
-  if (config.username) {
-    args.push('--username', config.username);
+
+  if (!useAuthCache(options)) {
+    if (config.username) {
+      args.push('--username', config.username);
+    }
+
+    if (config.password) {
+      args.push('--password', config.password);
+    }
   }
-  
-  if (config.password) {
-    args.push('--password', config.password);
-  }
-  
+
   // Always use --non-interactive to avoid prompts
   args.push('--non-interactive');
 
@@ -109,8 +125,47 @@ export function buildAuthArgs(config: SvnConfig, options: { noAuthCache?: boolea
   if (options.noAuthCache) {
     args.push('--no-auth-cache');
   }
-  
+
   return args;
+}
+
+/**
+ * Secrets that must never appear in a displayed command string.
+ *
+ * Each entry is a flag whose FOLLOWING argv element carries the secret.
+ * `--password` is the one svn actually uses; the others are listed so a
+ * future change that starts passing them is redacted from day one.
+ */
+const SECRET_VALUE_FLAGS = new Set([
+  '--password',
+  '--password-from-stdin'
+]);
+
+const REDACTED = '***';
+
+/**
+ * Return a copy of `args` with every secret value replaced by `***`.
+ *
+ * This is display-only: the real argv still goes to spawn() untouched, so svn
+ * behaviour is unchanged. Everything user-visible (SvnResponse.command,
+ * SvnError.command, timeout/exit-code messages) is built from the redacted
+ * copy, because those strings end up in transcripts, logs and agent context.
+ *
+ * `--username` is deliberately NOT redacted: it is useful for diagnosing
+ * auth failures and is not a secret.
+ */
+export function redactAuthArgs(args: string[]): string[] {
+  const out = [...args];
+  for (let i = 0; i < out.length; i++) {
+    if (!SECRET_VALUE_FLAGS.has(out[i])) continue;
+    // A flag in last position has no value to redact — leave it alone
+    // rather than pushing a bogus element.
+    if (i + 1 < out.length) {
+      out[i + 1] = REDACTED;
+      i++; // don't re-inspect the value we just replaced
+    }
+  }
+  return out;
 }
 
 /**
@@ -125,7 +180,9 @@ export async function executeSvnCommand(
   
   // Append authentication arguments
   const finalArgs = [...args, ...buildAuthArgs(config, { noAuthCache: options.noAuthCache })];
-  const command = `${config.svnPath} ${finalArgs.join(' ')}`;
+  // Display/telemetry only — never the real argv. Built from the redacted copy
+  // so the password cannot reach a response, an error message or a log.
+  const command = `${config.svnPath} ${redactAuthArgs(finalArgs).join(' ')}`;
   
   return new Promise((resolve, reject) => {
     // We avoid `shell: true` on Windows for two reasons:
