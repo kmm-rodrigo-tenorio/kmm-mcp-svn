@@ -223,6 +223,17 @@ another process's argv. Where the credential cache is already populated, set
 that explicitly bypass the cache (`--no-auth-cache`, used to recover from `E215004`) still send
 them.
 
+**Cache-only setup (recommended):** with the cache populated, drop `SVN_USERNAME` and
+`SVN_PASSWORD` from the configuration entirely and keep only `SVN_USE_AUTH_CACHE=true`. No
+password in the config file, none in argv. On Windows the cache
+(`%APPDATA%\Subversion\auth\svn.simple`) is encrypted with DPAPI. Populate it once by running
+`svn info <repo-url> --username <user>` by hand and answering the prompt. Two consequences:
+
+- `svn_clear_credentials` becomes irreversible from the MCP — with no password in the
+  environment, nothing can repopulate the cache. Recover by running that same `svn info` again.
+- `svn_diagnose` probes with `--no-auth-cache`, so that one check reports an authentication
+  failure. It is a diagnostic; normal operations are unaffected.
+
 `SVN_WORKING_DIRECTORY` and `SVN_URL` are independent — set either or both. With both configured, local operations (`svn_status`, `svn_commit`, ...) run in the working copy, and URL-capable tools (`svn_cat`, `svn_list`, `svn_info`, `svn_log`, `svn_diff`) can be called with:
 
 - a full URL (`https://svn.example.com/repo/trunk/file.sql`)
@@ -243,8 +254,7 @@ them.
         "SVN_PATH": "svn",
         "SVN_REPOSITORY_URL": "https://svn.kmm.com.br/producao",
         "SVN_WORKING_DIRECTORY": "C:/path/to/working/copy",
-        "SVN_USERNAME": "your_username",
-        "SVN_PASSWORD": "your_password"
+        "SVN_USE_AUTH_CACHE": "true"
       }
     }
   }
