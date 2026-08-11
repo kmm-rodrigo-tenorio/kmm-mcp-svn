@@ -174,6 +174,8 @@ export interface SvnCommitOptions {
   keepLocks?: boolean;
   noUnlock?: boolean;
   targets?: string[];
+  /** Per-call timeout in ms. See executeSvnCommand. */
+  timeout?: number;
 }
 
 export interface SvnUpdateOptions {
@@ -181,6 +183,10 @@ export interface SvnUpdateOptions {
   force?: boolean;
   ignoreExternals?: boolean;
   acceptConflicts?: 'postpone' | 'base' | 'mine-conflict' | 'theirs-conflict' | 'mine-full' | 'theirs-full';
+  depth?: 'empty' | 'files' | 'immediates' | 'infinity';
+  setDepth?: 'empty' | 'files' | 'immediates' | 'infinity' | 'exclude';
+  /** Per-call timeout in ms. Network-bound: defaults higher than the global one. */
+  timeout?: number;
 }
 
 export interface SvnCheckoutOptions {
@@ -188,6 +194,8 @@ export interface SvnCheckoutOptions {
   depth?: 'empty' | 'files' | 'immediates' | 'infinity';
   force?: boolean;
   ignoreExternals?: boolean;
+  /** Per-call timeout in ms. Network-bound: defaults higher than the global one. */
+  timeout?: number;
 }
 
 export interface SvnCopyOptions {
@@ -203,7 +211,6 @@ export interface SvnMoveOptions {
 }
 
 export interface SvnDeleteOptions {
-  message?: string;
   force?: boolean;
   keepLocal?: boolean;
 }

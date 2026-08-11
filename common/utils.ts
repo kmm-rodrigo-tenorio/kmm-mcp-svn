@@ -71,10 +71,65 @@ export async function isWorkingCopy(workingDirectory: string): Promise<boolean> 
 }
 
 /**
- * Normalize paths for Windows
+ * Normalize paths for Windows.
+ *
+ * ⚠ `baseDir` matters. Without it this resolves a relative path against the NODE
+ * PROCESS cwd, while svn is spawned with cwd = `config.workingDirectory`. The two
+ * are different directories — under Claude Desktop the process cwd is the app's
+ * install folder — so a relative path lands outside the working copy and svn
+ * answers "not a working copy", which reads as a repository problem rather than a
+ * path problem. Callers that have a config should always pass
+ * `config.workingDirectory`.
+ *
+ * Absolute inputs are unaffected: `path.resolve` ignores the base for those.
  */
-export function normalizePath(filePath: string): string {
-  return path.resolve(filePath).replace(/\\/g, '/');
+export function normalizePath(filePath: string, baseDir?: string): string {
+  return path.resolve(baseDir ?? process.cwd(), filePath).replace(/\\/g, '/');
+}
+
+/**
+ * Resolve a target for a command that only works on a WORKING COPY
+ * (`status`, `delete`, …), as opposed to `resolveTarget`, which is for commands
+ * that also accept a repository URL (`cat`, `log`, `list`, …).
+ *
+ * Three inputs, three outcomes:
+ *  - a URL is REFUSED, with a message saying why. Passing one used to be silently
+ *    mangled into a local path by `normalizePath`, producing a nonsense target;
+ *  - a repo-relative path (`/Software/_dev/...`) is mapped into the working copy;
+ *  - anything else is a local path, resolved against the working copy.
+ *
+ * ⚠ The repo-relative mapping assumes the working-copy root corresponds to the
+ * repository root. That holds for a checkout of the repo root (the usual layout
+ * here) and is stated rather than left implicit — a checkout of a subtree would
+ * need the offset.
+ */
+export function resolveWorkingCopyPath(target: string, config: SvnConfig): string {
+  if (!target || typeof target !== 'string') {
+    throw new SvnError('Target is required');
+  }
+
+  if (validateSvnUrl(target)) {
+    throw new SvnError(
+      `"${target}" is a repository URL, and this command only works on a working copy. ` +
+      `Pass a local path, or a repo-relative path starting with "/" — that gets mapped into ` +
+      `the working copy at ${config.workingDirectory}.`
+    );
+  }
+
+  if (target.startsWith('/')) {
+    // A leading slash means repo-relative — the same convention `resolveTarget`
+    // uses. ⚠ Do NOT gate this on `path.isAbsolute`: on Windows "/Software" IS
+    // absolute (root of the current drive), so that check skipped this branch and
+    // `path.resolve` then produced "C:/Software/..." — the working-copy segment
+    // silently dropped. A real local path on Windows starts with a drive letter
+    // or a UNC prefix, which is what keeps the two apart.
+    return normalizePath(path.join(config.workingDirectory!, target), config.workingDirectory);
+  }
+
+  if (!validatePath(target)) {
+    throw new SvnError(`Invalid path: ${target}`);
+  }
+  return normalizePath(target, config.workingDirectory);
 }
 
 /**
@@ -174,9 +229,20 @@ export function redactAuthArgs(args: string[]): string[] {
 export async function executeSvnCommand(
   config: SvnConfig,
   args: string[],
-  options: { input?: string; encoding?: BufferEncoding; noAuthCache?: boolean } = {}
+  options: {
+    input?: string;
+    encoding?: BufferEncoding;
+    noAuthCache?: boolean;
+    /**
+     * Per-call override, in ms. Network-bound commands (checkout, update) can far
+     * exceed the 30 s default, and the timeout kills the process with SIGTERM —
+     * an error that does not hint at time being the cause.
+     */
+    timeout?: number;
+  } = {}
 ): Promise<SvnResponse> {
   const startTime = Date.now();
+  const timeoutMs = options.timeout ?? config.timeout;
   
   // Append authentication arguments
   const finalArgs = [...args, ...buildAuthArgs(config, { noAuthCache: options.noAuthCache })];
@@ -269,8 +335,12 @@ export async function executeSvnCommand(
     // Configure timeout
     const timeout = setTimeout(() => {
       childProcess.kill('SIGTERM');
-      reject(new SvnError(`Command timeout after ${config.timeout}ms: ${command}`));
-    }, config.timeout);
+      reject(new SvnError(
+        `Command timeout after ${timeoutMs}ms: ${command}. ` +
+        `Network-bound commands can legitimately take longer — pass a larger \`timeout\` ` +
+        `on the call, or raise SVN_TIMEOUT.`
+      ));
+    }, timeoutMs);
     
     // Capture stdout using streaming decoder to handle multi-byte characters correctly
     childProcess.stdout?.on('data', (data) => {

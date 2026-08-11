@@ -28,10 +28,20 @@ import {
   validatePath,
   validateSvnUrl,
   resolveTarget,
+  resolveWorkingCopyPath,
   cleanOutput,
   formatDuration,
   clearSvnCredentials
 } from '../common/utils.js';
+
+/**
+ * Default timeout for the network-bound commands (checkout, update), in ms.
+ *
+ * The global default is 30 s, which is right for a local `status` and far too
+ * short for pulling a module branch over the network. Keeping one number for both
+ * meant the slow commands died with a SIGTERM that looked like a repository error.
+ */
+export const NETWORK_TIMEOUT_MS = 300_000;
 
 export class SvnService {
   private config: SvnConfig;
@@ -157,12 +167,13 @@ export class SvnService {
   async getStatus(path?: string, showAll: boolean = false): Promise<SvnResponse<SvnStatus[]>> {
     try {
       const args = ['status'];
-      
+
       if (path) {
-        if (!validatePath(path)) {
-          throw new SvnError(`Invalid path: ${path}`);
-        }
-        args.push(normalizePath(path));
+        // resolveWorkingCopyPath, not normalizePath: it maps a repo-relative
+        // "/Software/..." into the working copy and refuses a URL outright.
+        // `svn status` is a working-copy command — svn itself rejects URLs — so
+        // the old code silently turned one into a nonsense local path.
+        args.push(resolveWorkingCopyPath(path, this.config));
       }
 
       let response;
@@ -351,10 +362,12 @@ export class SvnService {
         if (!validatePath(path)) {
           throw new SvnError(`Invalid path: ${path}`);
         }
-        args.push(normalizePath(path));
+        args.push(normalizePath(path, this.config.workingDirectory));
       }
 
-      const response = await executeSvnCommand(this.config, args);
+      const response = await executeSvnCommand(this.config, args, {
+        timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+      });
 
       return {
         success: true,
@@ -394,15 +407,26 @@ export class SvnService {
       if (options.acceptConflicts) {
         args.push('--accept', options.acceptConflicts);
       }
-      
-      if (path) {
-        if (!validatePath(path)) {
-          throw new SvnError(`Invalid path: ${path}`);
-        }
-        args.push(normalizePath(path));
+
+      if (options.depth) {
+        args.push('--depth', options.depth);
       }
 
-      const response = await executeSvnCommand(this.config, args);
+      // `--set-depth` is how a single folder (or a single file) is pulled into an
+      // otherwise sparse working copy, and how a subtree is excluded again. It is
+      // the difference between fetching one module branch and fetching every
+      // branch of that module.
+      if (options.setDepth) {
+        args.push('--set-depth', options.setDepth);
+      }
+
+      if (path) {
+        args.push(resolveWorkingCopyPath(path, this.config));
+      }
+
+      const response = await executeSvnCommand(this.config, args, {
+        timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+      });
 
       return {
         success: true,
@@ -457,7 +481,7 @@ export class SvnService {
       }
 
       // Append normalized paths
-      args.push(...pathArray.map(p => normalizePath(p)));
+      args.push(...pathArray.map(p => normalizePath(p, this.config.workingDirectory)));
 
       const response = await executeSvnCommand(this.config, args);
 
@@ -486,6 +510,21 @@ export class SvnService {
         throw new SvnError('Commit message is required');
       }
 
+      // ⚠ An explicit target list is mandatory. Without one, svn commits
+      // everything modified below cwd — and cwd is the working-copy root, which
+      // here spans several unrelated trees. A whole-tree commit in one revision
+      // is not recoverable by editing; it has to be a deliberate act, so commit
+      // the root path explicitly if that is really what you want.
+      const targets = (paths && paths.length > 0) ? paths : options.targets;
+      if (!targets || targets.length === 0) {
+        throw new SvnError(
+          'Refusing to commit without an explicit path list. With no targets, svn sweeps every ' +
+          `modified file under ${this.config.workingDirectory} into a single revision. ` +
+          'Pass the files you mean to commit. To commit an entire tree on purpose, pass its root ' +
+          'path explicitly.'
+        );
+      }
+
       const args = ['commit'];
       
       if (options.message) {
@@ -493,7 +532,7 @@ export class SvnService {
       }
       
       if (options.file) {
-        args.push('--file', normalizePath(options.file));
+        args.push('--file', normalizePath(options.file, this.config.workingDirectory));
       }
       
       if (options.force) {
@@ -508,19 +547,11 @@ export class SvnService {
         args.push('--no-unlock');
       }
 
-      // Append specific paths when provided
-      if (paths && paths.length > 0) {
-        for (const path of paths) {
-          if (!validatePath(path)) {
-            throw new SvnError(`Invalid path: ${path}`);
-          }
-        }
-        args.push(...paths.map(p => normalizePath(p)));
-      } else if (options.targets) {
-        args.push(...options.targets.map(p => normalizePath(p)));
-      }
+      args.push(...targets.map(p => resolveWorkingCopyPath(p, this.config)));
 
-      const response = await executeSvnCommand(this.config, args);
+      const response = await executeSvnCommand(this.config, args, {
+        timeout: options.timeout
+      });
 
       return {
         success: true,
@@ -544,30 +575,23 @@ export class SvnService {
   ): Promise<SvnResponse<string>> {
     try {
       const pathArray = Array.isArray(paths) ? paths : [paths];
-      
-      // Validate all paths
-      for (const path of pathArray) {
-        if (!validatePath(path)) {
-          throw new SvnError(`Invalid path: ${path}`);
-        }
-      }
 
       const args = ['delete'];
-      
+
       if (options.force) {
         args.push('--force');
       }
-      
+
       if (options.keepLocal) {
         args.push('--keep-local');
       }
-      
-      if (options.message) {
-        args.push('--message', options.message);
-      }
 
-      // Append normalized paths
-      args.push(...pathArray.map(p => normalizePath(p)));
+      // ⚠ No `--message` here on purpose. It only means something for a delete
+      // straight against a repository URL, and that path was never reachable:
+      // `normalizePath` turned the URL into a local path. Offering the parameter
+      // implied a working feature. A URL delete is also an immediate, irreversible
+      // repository change, so resolveWorkingCopyPath refuses one outright.
+      args.push(...pathArray.map(p => resolveWorkingCopyPath(p, this.config)));
 
       const response = await executeSvnCommand(this.config, args);
 
@@ -601,7 +625,7 @@ export class SvnService {
       const args = ['revert'];
       
       // Append normalized paths
-      args.push(...pathArray.map(p => normalizePath(p)));
+      args.push(...pathArray.map(p => normalizePath(p, this.config.workingDirectory)));
 
       const response = await executeSvnCommand(this.config, args);
 
@@ -629,7 +653,7 @@ export class SvnService {
         if (!validatePath(path)) {
           throw new SvnError(`Invalid path: ${path}`);
         }
-        args.push(normalizePath(path));
+        args.push(normalizePath(path, this.config.workingDirectory));
       }
 
       const response = await executeSvnCommand(this.config, args);

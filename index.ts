@@ -150,9 +150,11 @@ server.tool(
 // 3. Get file status
 server.tool(
   "svn_status",
-  "Show the status of files in the working copy",
+  "Show the status of files in the working copy. Accepts a local path or a repo-relative path " +
+  "(\"/Software/...\"), which is mapped into the working copy. A repository URL is refused — status " +
+  "is a working-copy command.",
   {
-    path: z.string().optional().describe("Specific path to query"),
+    path: z.string().optional().describe("Path to query — local, or repo-relative starting with \"/\". Omit and the whole working copy is scanned."),
     showAll: z.boolean().optional().default(false).describe("Also show remote status")
   },
   async (args) => {
@@ -286,7 +288,8 @@ server.tool(
     revision: z.union([z.number(), z.literal("HEAD")]).optional().describe("Specific revision"),
     depth: z.enum(["empty", "files", "immediates", "infinity"]).optional().describe("Checkout depth"),
     force: z.boolean().optional().default(false).describe("Force checkout"),
-    ignoreExternals: z.boolean().optional().default(false).describe("Ignore externals")
+    ignoreExternals: z.boolean().optional().default(false).describe("Ignore externals"),
+    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000 for this command — checking out a real module branch over the network routinely needs more than the global 30s.")
   },
   async (args) => {
     try {
@@ -294,7 +297,8 @@ server.tool(
         revision: args.revision,
         depth: args.depth,
         force: args.force,
-        ignoreExternals: args.ignoreExternals
+        ignoreExternals: args.ignoreExternals,
+        timeout: args.timeout
       };
 
       const result = await getSvnService().checkout(args.url, args.path, options);
@@ -320,13 +324,18 @@ server.tool(
 // 7. Update working copy
 server.tool(
   "svn_update",
-  "Update the working copy from the repository",
+  "Update the working copy from the repository. Accepts a local path or a repo-relative path " +
+  "(\"/Software/...\"), and `setDepth` to pull just one folder or one file into an otherwise sparse " +
+  "working copy — which is how you fetch a single module branch instead of every branch of that module.",
   {
-    path: z.string().optional().describe("Specific path to update"),
+    path: z.string().optional().describe("Path to update — local, or repo-relative starting with \"/\". Omit and the ENTIRE working copy is updated."),
     revision: z.union([z.number(), z.literal("HEAD"), z.literal("BASE"), z.literal("COMMITTED"), z.literal("PREV")]).optional().describe("Target revision"),
     force: z.boolean().optional().default(false).describe("Force update"),
     ignoreExternals: z.boolean().optional().default(false).describe("Ignore externals"),
-    acceptConflicts: z.enum(["postpone", "base", "mine-conflict", "theirs-conflict", "mine-full", "theirs-full"]).optional().describe("How to handle conflicts")
+    acceptConflicts: z.enum(["postpone", "base", "mine-conflict", "theirs-conflict", "mine-full", "theirs-full"]).optional().describe("How to handle conflicts"),
+    depth: z.enum(["empty", "files", "immediates", "infinity"]).optional().describe("Depth for this update only, without recording it."),
+    setDepth: z.enum(["empty", "files", "immediates", "infinity", "exclude"]).optional().describe("Record a new depth for this path: `infinity` pulls the whole subtree in, `exclude` drops it. Use it to bring one branch folder down without fetching its siblings."),
+    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000 for this command.")
   },
   async (args) => {
     try {
@@ -334,7 +343,10 @@ server.tool(
         revision: args.revision,
         force: args.force,
         ignoreExternals: args.ignoreExternals,
-        acceptConflicts: args.acceptConflicts
+        acceptConflicts: args.acceptConflicts,
+        depth: args.depth,
+        setDepth: args.setDepth,
+        timeout: args.timeout
       };
 
       const result = await getSvnService().update(args.path, options);
@@ -401,30 +413,75 @@ server.tool(
 // 9. Commit changes
 server.tool(
   "svn_commit",
-  "Commit changes to the repository",
+  "Commit changes to the repository. TWO STEPS: the first call previews what would be committed and " +
+  "writes nothing; a second call with `confirm: true` performs it. `paths` is required — a commit with " +
+  "no explicit targets sweeps every modified file under the working-copy root into one revision.",
   {
     message: z.string().describe("Commit message"),
-    paths: z.array(z.string()).optional().describe("Specific files to commit"),
+    paths: z.array(z.string()).min(1).describe("The files to commit. REQUIRED: without it svn commits everything modified under the working-copy root."),
+    confirm: z.boolean().optional().default(false).describe("Must be true to actually commit. Left false (the default) you get a preview and nothing is written."),
     file: z.string().optional().describe("File containing the commit message"),
     force: z.boolean().optional().default(false).describe("Force commit"),
     keepLocks: z.boolean().optional().default(false).describe("Keep locks after commit"),
-    noUnlock: z.boolean().optional().default(false).describe("Do not unlock files")
+    noUnlock: z.boolean().optional().default(false).describe("Do not unlock files"),
+    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms.")
   },
   async (args) => {
     try {
+      // Step one: show what svn would send, and stop. A commit is visible to the
+      // whole team and cannot be edited afterwards, so the preview is the default.
+      if (args.confirm !== true) {
+        const svc = getSvnService();
+        const statuses = await Promise.all(
+          args.paths.map(async p => {
+            try {
+              const st = await svc.getStatus(p, false);
+              return { path: p, entries: st.data ?? [], error: undefined as string | undefined };
+            } catch (e: any) {
+              return { path: p, entries: [], error: e.message as string };
+            }
+          })
+        );
+
+        const lines = statuses.map(s => {
+          if (s.error) return `- \`${s.path}\` — ⚠️ ${s.error}`;
+          if (s.entries.length === 0) return `- \`${s.path}\` — no local modification`;
+          return `- \`${s.path}\`\n` +
+            s.entries.map(e => `  - \`${e.status}\` ${e.path}`).join('\n');
+        });
+
+        const nothing = statuses.every(s => !s.error && s.entries.length === 0);
+
+        return {
+          content: [{
+            type: "text",
+            text: `🔍 **Commit preview — nothing was written**\n\n` +
+              `**Message:** ${args.message}\n` +
+              `**Targets:** ${args.paths.length}\n\n` +
+              lines.join('\n') + `\n\n` +
+              (nothing
+                ? `⚠️ None of these paths has a local modification. A commit now would produce ` +
+                  `an empty revision or fail. Check the paths first.\n\n`
+                : '') +
+              `To commit, call again with \`confirm: true\`.`
+          }],
+        };
+      }
+
       const options = {
         message: args.message,
         file: args.file,
         force: args.force,
         keepLocks: args.keepLocks,
-        noUnlock: args.noUnlock
+        noUnlock: args.noUnlock,
+        timeout: args.timeout
       };
 
       const result = await getSvnService().commit(options, args.paths);
 
       const commitText = `✅ **Commit Completed**\n\n` +
         `**Message:** ${args.message}\n` +
-        `**Files:** ${args.paths?.join(', ') || 'All changes'}\n` +
+        `**Files:** ${args.paths.join(', ')}\n` +
         `**Command:** ${result.command}\n` +
         `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n\n` +
         `**Output:**\n\`\`\`\n${result.data}\n\`\`\``;
@@ -445,15 +502,13 @@ server.tool(
   "svn_delete",
   "Remove files from version control",
   {
-    paths: z.union([z.string(), z.array(z.string())]).describe("File(s) or director(y|ies) to delete"),
-    message: z.string().optional().describe("Message for direct repository deletion"),
+    paths: z.union([z.string(), z.array(z.string())]).describe("File(s) or director(y|ies) to delete, in the WORKING COPY. A repository URL is refused: deleting straight from the repository is immediate and irreversible."),
     force: z.boolean().optional().default(false).describe("Force deletion"),
     keepLocal: z.boolean().optional().default(false).describe("Keep local copy")
   },
   async (args) => {
     try {
       const options = {
-        message: args.message,
         force: args.force,
         keepLocal: args.keepLocal
       };

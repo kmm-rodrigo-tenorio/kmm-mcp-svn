@@ -234,6 +234,21 @@ password in the config file, none in argv. On Windows the cache
 - `svn_diagnose` probes with `--no-auth-cache`, so that one check reports an authentication
   failure. It is a diagnostic; normal operations are unaffected.
 
+Paths are resolved against `SVN_WORKING_DIRECTORY`, not against the process working directory. A
+relative path therefore lands inside the working copy, which is where svn itself runs — before, it
+resolved against wherever Node happened to start and svn answered "not a working copy", an error that
+pointed at the repository instead of at the path.
+
+Working-copy-only commands (`svn_status`, `svn_delete`) also accept a repo-relative path (`/trunk/x.sql`)
+and map it into the working copy; they refuse a URL, because svn does not accept one for them.
+
+`svn_checkout` and `svn_update` default to a **300 s** timeout instead of the global 30 s — fetching a
+real module branch over the network routinely needs more, and the timeout kills the process with a
+signal that gives no hint that time was the cause. Every slow command also takes a per-call `timeout`.
+
+`svn_update` exposes `setDepth`, which is how a single folder or file is pulled into an otherwise sparse
+working copy — the difference between fetching one branch and fetching all of a module's branches.
+
 `SVN_WORKING_DIRECTORY` and `SVN_URL` are independent — set either or both. With both configured, local operations (`svn_status`, `svn_commit`, ...) run in the working copy, and URL-capable tools (`svn_cat`, `svn_list`, `svn_info`, `svn_log`, `svn_diff`) can be called with:
 
 - a full URL (`https://svn.example.com/repo/trunk/file.sql`)
@@ -346,30 +361,44 @@ svn_add(
 ```
 
 #### `svn_commit`
-Commit changes to the repository.
+Commit changes to the repository. **Two steps:** the first call previews and writes nothing; a second
+call with `confirm: true` performs it.
 
 ```
 svn_commit(
   message: string,
-  paths?: string[],
+  paths: string[],          // REQUIRED, at least one
+  confirm?: boolean,        // default false -> preview only
   file?: string,
   force?: boolean,
   keepLocks?: boolean,
-  noUnlock?: boolean
+  noUnlock?: boolean,
+  timeout?: number
 )
 ```
 
+⚠ `paths` is required, and that is a deliberate breaking change. With no targets, `svn commit` sweeps
+every modified file under the working-copy root into a single revision — and a working copy rooted at a
+repository root spans every project in it. A commit cannot be edited afterwards, so a whole-tree commit
+has to be an explicit act: pass the root path if that is really what you want.
+
+The preview lists the `svn status` of each target, and says so when none of them has a local
+modification.
+
 #### `svn_delete`
-Remove files from version control.
+Remove files from version control, **in the working copy**.
 
 ```
 svn_delete(
   paths: string | string[],
-  message?: string,
   force?: boolean,
   keepLocal?: boolean
 )
 ```
+
+⚠ `message` was removed. It only ever applied to a delete straight against a repository URL, and that
+path was unreachable — the URL was silently turned into a local path. A URL is now refused with a
+message saying why: deleting from the repository is immediate and irreversible.
 
 #### `svn_revert`
 Revert local changes on files.
