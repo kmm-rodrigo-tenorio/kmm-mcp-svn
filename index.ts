@@ -5,12 +5,42 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 // Import SVN service
-import { SvnService } from "./tools/svn-service.js";
+import { SvnService, DETACH_AFTER_MS } from "./tools/svn-service.js";
 import { formatDuration } from "./common/utils.js";
+import { getJob, listJobs, SvnJob } from "./common/jobs.js";
 
 import { VERSION } from "./common/version.js";
 
 // Create the MCP Server with proper configuration
+/**
+ * What a caller sees when a command outlasted its threshold.
+ *
+ * The wording is the point. This same situation previously surfaced as
+ * `MCP error -32001: Request timed out` on an operation that had in fact
+ * SUCCEEDED — 52.5 MB fetched, working copy intact. An agent reading a timeout
+ * retries, and a second svn on the same working copy fights the first for its
+ * lock. So the message has to say, in this order: not an error, the job id, the
+ * target, and that verification is `svn_info` on the target rather than repeating
+ * the command.
+ */
+function detachedNotice(opts: { jobId?: string; target?: string; what: string }): string {
+  return `⏳ **${opts.what} is still running — this is NOT an error and NOT a failure.**
+
+` +
+    `**Job:** \`${opts.jobId ?? '(unknown)'}\`
+` +
+    (opts.target ? `**Target:** \`${opts.target}\`
+` : '') +
+    `
+It outlasted the ${Math.round(DETACH_AFTER_MS / 1000)}s threshold, so the answer came back ` +
+    `before the work finished. The process was left running — nothing was cancelled.
+
+` +
+    `Next: \`svn_job_status\` with that job id to see whether it finished, then confirm the effect ` +
+    `with \`svn_info\` on the target. **Do not repeat the command** — a second svn on the same ` +
+    `working copy contends for its lock.`;
+}
+
 const server = new McpServer({
   name: "svn-mcp-server",
   version: VERSION,
@@ -303,6 +333,14 @@ server.tool(
 
       const result = await getSvnService().checkout(args.url, args.path, options);
 
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target: args.path ?? args.url, what: 'Checkout'
+          }) }],
+        };
+      }
+
       const checkoutText = `📥 **Checkout Completed**\n\n` +
         `**URL:** ${args.url}\n` +
         `**Destination:** ${args.path || 'Current directory'}\n` +
@@ -334,7 +372,7 @@ server.tool(
     ignoreExternals: z.boolean().optional().default(false).describe("Ignore externals"),
     acceptConflicts: z.enum(["postpone", "base", "mine-conflict", "theirs-conflict", "mine-full", "theirs-full"]).optional().describe("How to handle conflicts"),
     depth: z.enum(["empty", "files", "immediates", "infinity"]).optional().describe("Depth for this update only, without recording it."),
-    setDepth: z.enum(["empty", "files", "immediates", "infinity", "exclude"]).optional().describe("Record a new depth for this path: `infinity` pulls the whole subtree in, `exclude` drops it. Use it to bring one branch folder down without fetching its siblings."),
+    setDepth: z.enum(["empty", "files", "immediates", "infinity", "exclude"]).optional().describe("Record a new depth for this path: `infinity` pulls the whole subtree in, `exclude` drops it. Prefer the SMALLEST path that answers your question — an entire module branch is large (measured: 2376 files, 52.8 MB, and it detaches), while `Oracle/Objetos/Funcoes` alone finishes in ~2s, and ONE FILE is instant: point `path` straight at the file with `setDepth: 'infinity'`. Missing intermediate directories are created by svn itself (`--parents`, always passed), so a deep path into a branch that was never checked out works on the first call — measured: one file out of an absent branch in ~1s."),
     timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000 for this command.")
   },
   async (args) => {
@@ -350,6 +388,14 @@ server.tool(
       };
 
       const result = await getSvnService().update(args.path, options);
+
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target: args.path, what: 'Update'
+          }) }],
+        };
+      }
 
       const updateText = `🔄 **Update Completed**\n\n` +
         `**Path:** ${args.path || 'Current directory'}\n` +
@@ -479,6 +525,17 @@ server.tool(
 
       const result = await getSvnService().commit(options, args.paths);
 
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target: args.paths[0], what: 'Commit'
+          }) + `
+
+⚠️ Verify with \`svn_log\` on the path before considering another commit: a ` +
+            `commit repeated because the first looked failed is a DOUBLE commit.` }],
+        };
+      }
+
       const commitText = `✅ **Commit Completed**\n\n` +
         `**Message:** ${args.message}\n` +
         `**Files:** ${args.paths.join(', ')}\n` +
@@ -525,6 +582,93 @@ server.tool(
 
       return {
         content: [{ type: "text", text: deleteText }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `❌ **Error:** ${error.message}` }],
+      };
+    }
+  }
+);
+
+// 10.5. Status of a detached operation
+server.tool(
+  "svn_job_status",
+  "Check an SVN operation that was DETACHED for outlasting its threshold. Pass the job id from the " +
+  "\"still running\" answer, or omit it to list recent jobs. Detached means the answer came back before " +
+  "the work finished — not that anything failed. After a job reports done, confirm the effect with " +
+  "`svn_info` or `svn_log` on the target rather than repeating the command.",
+  {
+    jobId: z.string().optional().describe("Job id, e.g. 'svnjob-1'. Omit to list recent jobs.")
+  },
+  async (args) => {
+    try {
+      const render = (job: SvnJob) => {
+        const elapsed = (job.finishedAt ?? Date.now()) - job.startedAt;
+        const icon = job.state === 'running' ? '⏳' : job.state === 'done' ? '✅' : '❌';
+        return `${icon} **${job.id}** — ${job.state}
+` +
+          (job.target ? `- **Target:** \`${job.target}\`
+` : '') +
+          `- **Elapsed:** ${formatDuration(elapsed)}` +
+          (job.state === 'running' ? ' (still going)' : '') + `
+` +
+          (job.exitCode !== undefined ? `- **Exit code:** ${job.exitCode}
+` : '') +
+          `- **Command:** ${job.command}
+`;
+      };
+
+      if (args.jobId) {
+        const job = getJob(args.jobId);
+        if (!job) {
+          return {
+            content: [{ type: "text", text:
+              `❌ No job \`${args.jobId}\`. Jobs live in memory only, so a server restart forgets them — ` +
+              `that is not evidence the operation failed. Verify the effect directly with \`svn_info\` ` +
+              `on the target.`
+            }],
+          };
+        }
+        const tail = [job.stdoutTail, job.stderrTail].filter(t => t.trim()).join('\n');
+        return {
+          content: [{ type: "text", text:
+            render(job) +
+            (tail ? `
+**Output (tail):**
+\`\`\`
+${tail}
+\`\`\`
+` : '') +
+            (job.state === 'running'
+              ? `
+Still running. Check again later; do not start another operation on this path.`
+              : `
+Finished. Confirm the effect with \`svn_info\` / \`svn_log\` on the target — the exit ` +
+                `code says the command ended, not that the result is what you wanted.`)
+          }],
+        };
+      }
+
+      const jobs = listJobs();
+      if (jobs.length === 0) {
+        return {
+          content: [{ type: "text", text:
+            `📭 No detached operations recorded. Only commands that outlast the ` +
+            `${Math.round(DETACH_AFTER_MS / 1000)}s threshold get a job — anything that finished inline ` +
+            `never appears here.`
+          }],
+        };
+      }
+      const running = jobs.filter(j => j.state === 'running');
+      return {
+        content: [{ type: "text", text:
+          `🗂️ **SVN jobs** (${jobs.length})` +
+          (running.length ? ` · **${running.length} still running**` : '') + `
+
+` +
+          jobs.map(render).join('\n')
+        }],
       };
     } catch (error: any) {
       return {
@@ -775,6 +919,7 @@ async function runServer() {
       "svn_diagnose",
       "svn_info",
       "svn_status",
+      "svn_job_status",
       "svn_log",
       "svn_diff",
       "svn_checkout",

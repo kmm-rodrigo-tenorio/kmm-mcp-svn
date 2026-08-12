@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SvnListEntry, SVN_STATUS_CODES } from './types.js';
 import iconv from 'iconv-lite';
+import { registerJob, appendJobOutput, finishJob } from './jobs.js';
 
 /**
  * Create SVN configuration from environment variables and parameters.
@@ -239,10 +240,20 @@ export async function executeSvnCommand(
      * an error that does not hint at time being the cause.
      */
     timeout?: number;
+    /**
+     * Stop waiting after this many ms and return `detached: true` with a job id,
+     * leaving the process running. For commands that legitimately outlast the MCP
+     * client's own request timeout — see `common/jobs.ts`.
+     */
+    detachAfterMs?: number;
+    /** What the command acts on, recorded on the job so it can be verified later. */
+    target?: string;
   } = {}
 ): Promise<SvnResponse> {
   const startTime = Date.now();
-  const timeoutMs = options.timeout ?? config.timeout;
+  // A detachable command must not also be killed on a deadline: the whole point
+  // is to let it finish unattended.
+  const timeoutMs = options.detachAfterMs ? 0 : (options.timeout ?? config.timeout ?? 30_000);
   
   // Append authentication arguments
   const finalArgs = [...args, ...buildAuthArgs(config, { noAuthCache: options.noAuthCache })];
@@ -332,24 +343,53 @@ export async function executeSvnCommand(
     const stdoutDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
     const stderrDecoder = iconv.getDecoder('utf8', { stripBOM: false, addBOM: false });
     
-    // Configure timeout
-    const timeout = setTimeout(() => {
-      childProcess.kill('SIGTERM');
-      reject(new SvnError(
-        `Command timeout after ${timeoutMs}ms: ${command}. ` +
-        `Network-bound commands can legitimately take longer — pass a larger \`timeout\` ` +
-        `on the call, or raise SVN_TIMEOUT.`
-      ));
-    }, timeoutMs);
-    
-    // Capture stdout using streaming decoder to handle multi-byte characters correctly
+    // Configure timeout. Zero means "no deadline", which is what a detachable
+    // command gets: killing it at the threshold would destroy exactly the case
+    // detaching exists to rescue.
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => {
+          childProcess.kill('SIGTERM');
+          reject(new SvnError(
+            `Command timeout after ${timeoutMs}ms: ${command}. ` +
+            `Network-bound commands can legitimately take longer — pass a larger \`timeout\` ` +
+            `on the call, or raise SVN_TIMEOUT.`
+          ));
+        }, timeoutMs)
+      : undefined;
+
+    // A detachable command gets a job up front, so its output has somewhere to go
+    // once nobody is awaiting it any more.
+    const job = options.detachAfterMs
+      ? registerJob({ command, target: options.target, cwd: resolvedCwd })
+      : undefined;
+    let detached = false;
+    const detachTimer = options.detachAfterMs
+      ? setTimeout(() => {
+          detached = true;
+          resolve({
+            success: true,
+            command,
+            workingDirectory: config.workingDirectory!,
+            executionTime: Date.now() - startTime,
+            detached: true,
+            jobId: job!.id
+          });
+        }, options.detachAfterMs)
+      : undefined;
+
+    // ⚠ These listeners stay attached after detaching, on purpose. stdio is
+    // 'pipe': stop draining it and the OS buffer fills, which BLOCKS svn. What is
+    // abandoned is the await, never the reading.
     childProcess.stdout?.on('data', (data) => {
-      stdout += stdoutDecoder.write(data);
+      const text = stdoutDecoder.write(data);
+      stdout += text;
+      if (job) appendJobOutput(job.id, 'stdout', text);
     });
 
-    // Capture stderr using streaming decoder to handle multi-byte characters correctly
     childProcess.stderr?.on('data', (data) => {
-      stderr += stderrDecoder.write(data);
+      const text = stderrDecoder.write(data);
+      stderr += text;
+      if (job) appendJobOutput(job.id, 'stderr', text);
     });
 
     // Write input if provided
@@ -360,12 +400,20 @@ export async function executeSvnCommand(
 
     // Handle process completion
     childProcess.on('close', (code) => {
-      clearTimeout(timeout);
-      
+      if (timeout) clearTimeout(timeout);
+      if (detachTimer) clearTimeout(detachTimer);
+
       // Finalize decoders to flush any remaining buffered data
       stdout += stdoutDecoder.end();
       stderr += stderrDecoder.end();
-      
+
+      if (job) finishJob(job.id, code);
+
+      // Already detached: the caller was answered long ago. Recording the outcome
+      // on the job is all that is left — resolving twice is a no-op, and rejecting
+      // would be an unhandled rejection with nobody to catch it.
+      if (detached) return;
+
       const executionTime = Date.now() - startTime;
       const response: SvnResponse = {
         success: code === 0,
@@ -373,33 +421,95 @@ export async function executeSvnCommand(
         workingDirectory: config.workingDirectory!,
         executionTime
       };
-      
+
       if (code === 0) {
         response.data = stdout.trim();
         resolve(response);
       } else {
-        const error = new SvnError(`SVN command failed with code ${code}: ${command}`);
+        // ⚠ The reason has to be IN the message, not only on `error.stderr`.
+        // Nine call sites rethrow `Failed to X: ${error.message}` and drop the
+        // rest, so an svn failure arrived as "failed with code 1" and nothing
+        // else — a real E155007 took a hand-run of the same command to diagnose.
+        const detail = errorDetail(stderr);
+        const error = new SvnError(
+          `SVN command failed with code ${code}: ${command}${detail ? `\n${detail}` : ''}`
+        );
         error.code = code || undefined;
         error.stderr = stderr.trim();
         error.command = command;
-        
+
         response.error = error.message;
         response.data = stderr.trim();
-        
+
         reject(error);
       }
     });
-    
+
     // Handle process errors
     childProcess.on('error', (error) => {
-      clearTimeout(timeout);
-      
+      if (timeout) clearTimeout(timeout);
+      if (detachTimer) clearTimeout(detachTimer);
+      if (job) finishJob(job.id, -1, `spawn failed: ${error.message}`);
+      if (detached) return;
+
       const svnError = new SvnError(`Failed to execute SVN command: ${error.message}`);
       svnError.command = command;
-      
+
       reject(svnError);
     });
   });
+}
+
+/**
+ * svn's reason for skipping `target`, if it skipped it — otherwise undefined.
+ *
+ * ⚠ This exists because `--parents` turns a hard failure into a silent success.
+ * Asking for a path that is not in the repository exits **1** with
+ * `E155007` normally, but with `--parents` it exits **0** and merely prints
+ * `Skipped '<path>' -- Has no versioned parent`. Reporting that as "Update
+ * Completed" would be the same class of lie as reporting a finished update as a
+ * timeout: the caller asked for a path and got nothing.
+ *
+ * Only a skip of the REQUESTED target counts. A bulk update can legitimately skip
+ * unrelated paths while doing everything else correctly, and that is not a failure
+ * of the call.
+ */
+export function skippedTargetReason(output: string, target?: string): string | undefined {
+  if (!output || !target) return undefined;
+
+  const normalize = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const wanted = normalize(target);
+
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^Skipped(?: [^']*)? '(.+?)'(?:\s*--\s*(.+))?$/);
+    if (!match) continue;
+
+    // ⚠ svn reports the path RELATIVE TO ITS CWD, not as it was passed in. The
+    // server runs with cwd at the working-copy root, so an absolute target comes
+    // back as 'Software\_dev\...'. Comparing the two as equals silently never
+    // matched — the guard was dead code until this ran against the real output.
+    // The leading separator keeps the suffix from matching a different path that
+    // merely ends the same way.
+    const skipped = normalize(match[1]);
+    if (wanted === skipped || wanted.endsWith(`/${skipped}`)) {
+      return (match[2] || 'no reason given by svn').trim();
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * The part of svn's stderr worth carrying in an error message.
+ *
+ * Keeps the TAIL: svn prints context first ("Skipped '...'") and the actual
+ * `svn: E155007: ...` line last, so the end is the part that names the cause.
+ */
+export function errorDetail(stderr: string, maxLines = 5, maxChars = 600): string {
+  const trimmed = stderr.trim();
+  if (!trimmed) return '';
+  const tail = trimmed.split(/\r?\n/).slice(-maxLines).join('\n');
+  return tail.length <= maxChars ? tail : tail.slice(tail.length - maxChars);
 }
 
 /**
@@ -490,25 +600,72 @@ export function parseInfoOutput(output: string): SvnInfo {
 /**
  * Parse output of `svn status`
  */
+function unescapeXml(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    // Ampersand last, or an escaped entity would be decoded twice.
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Parse the output of `svn status --xml`.
+ *
+ * ⚠ This used to read fixed columns — `line[0]` for the code and
+ * `line.substring(8)` for the path — and that arithmetic does not hold:
+ *
+ *  - a property-only modification is reported as `' M'`, with a SPACE in column 0.
+ *    The output then starts with whitespace, and the global `.trim()` applied
+ *    before parsing shifted only the FIRST line one column left, so `substring(8)`
+ *    ate the first character of its path. Observed live: `C:\SVN\...` came back as
+ *    `:\SVN\...` — a path no consumer can use;
+ *  - `--show-updates` inserts the out-of-date marker and the server revision
+ *    before the path, so the fixed offset swallowed those into the "path" too;
+ *  - and it filled none of the `revision` / `changedRev` / `changedAuthor` /
+ *    `changedDate` fields the type has always declared.
+ *
+ * The XML form is delimited, so none of that applies: leading spaces, paths with
+ * spaces (common here — `TASK 25035`, `Ticket 259210.4`) and the extra `-u`
+ * columns all stop mattering. A scan over the `<entry>` elements is enough; a
+ * general XML parser would be a dependency for four attributes.
+ */
 export function parseStatusOutput(output: string): SvnStatus[] {
-  const lines = output.split('\n').filter(line => line.trim());
   const statusList: SvnStatus[] = [];
-  
-  for (const line of lines) {
-    if (line.length < 8) continue;
-    
-    const statusCode = line[0];
-    const propStatusCode = line[1];
-    const path = line.substring(8).trim();
-    
+  if (!output) return statusList;
+
+  const entryPattern = /<entry\b[^>]*\bpath="([^"]*)"[^>]*>([\s\S]*?)<\/entry>/g;
+  let entry: RegExpExecArray | null;
+
+  while ((entry = entryPattern.exec(output)) !== null) {
+    const path = unescapeXml(entry[1]);
+    const body = entry[2];
+
+    const wc = body.match(/<wc-status\b([^>]*)>/);
+    const attrs = wc ? wc[1] : '';
+    const item = attrs.match(/\bitem="([^"]*)"/)?.[1];
+    const revision = attrs.match(/\brevision="(\d+)"/)?.[1];
+
+    const commit = body.match(/<commit\b[^>]*\brevision="(\d+)"[^>]*>([\s\S]*?)<\/commit>/);
+    const changedRev = commit?.[1];
+    const author = commit?.[2].match(/<author>([\s\S]*?)<\/author>/)?.[1];
+    const date = commit?.[2].match(/<date>([\s\S]*?)<\/date>/)?.[1];
+
     const status: SvnStatus = {
       path,
-      status: (SVN_STATUS_CODES as any)[statusCode] || 'unknown'
+      // `item` already carries the long name ('modified', 'unversioned', ...),
+      // which is exactly the union the type declares.
+      status: (item as SvnStatus['status']) ?? 'unknown' as SvnStatus['status']
     };
-    
+    if (revision !== undefined) status.revision = Number(revision);
+    if (changedRev !== undefined) status.changedRev = Number(changedRev);
+    if (author) status.changedAuthor = unescapeXml(author);
+    if (date) status.changedDate = date;
+
     statusList.push(status);
   }
-  
+
   return statusList;
 }
 

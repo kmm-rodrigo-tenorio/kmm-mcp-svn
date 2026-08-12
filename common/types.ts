@@ -21,6 +21,14 @@ export interface SvnResponse<T = any> {
   command: string;
   workingDirectory: string;
   executionTime?: number;
+  /**
+   * The command outlasted its detach threshold and is STILL RUNNING. Not a
+   * failure, and not a partial result: nothing about the outcome is known yet.
+   * Look it up with the job id, and verify the effect with `svn info` on the
+   * target rather than by repeating the command.
+   */
+  detached?: boolean;
+  jobId?: string;
 }
 
 export class SvnError extends Error {

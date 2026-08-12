@@ -31,8 +31,11 @@ import {
   resolveWorkingCopyPath,
   cleanOutput,
   formatDuration,
-  clearSvnCredentials
+  clearSvnCredentials,
+  skippedTargetReason
 } from '../common/utils.js';
+
+import { findOverlappingJob } from '../common/jobs.js';
 
 /**
  * Default timeout for the network-bound commands (checkout, update), in ms.
@@ -42,6 +45,18 @@ import {
  * meant the slow commands died with a SIGTERM that looked like a repository error.
  */
 export const NETWORK_TIMEOUT_MS = 300_000;
+
+/**
+ * How long a slow command is awaited before it is DETACHED and reported as still
+ * running.
+ *
+ * Sized against the constraint that actually bites: the MCP client abandons a
+ * request at around 60s, and no server-side timeout reaches that. Answering at 30s
+ * leaves comfortable room, so a long operation is reported honestly as "running"
+ * instead of surfacing as a protocol timeout on an operation that in fact
+ * succeeded.
+ */
+export const DETACH_AFTER_MS = 30_000;
 
 export class SvnService {
   private config: SvnConfig;
@@ -54,25 +69,46 @@ export class SvnService {
    * Helper function to handle common SVN errors
    */
   private handleSvnError(error: any, operation: string): never {
-    let message = `Failed to ${operation}`;
+    // ⚠ The hint is ADDED to svn's own words, never substituted for them. These
+    // canned lines used to replace the reason entirely, which turned a precise
+    // E155007 about one unfetched path into a blanket claim that the whole
+    // working copy is invalid — wrong, and it hid the path that actually failed.
+    const detail: string = (error.stderr && error.stderr.length > 0) ? error.stderr : error.message;
+    let hint = '';
 
-    if (error.message.includes('E155007') || error.message.includes('not a working copy')) {
-      message = `The directory '${this.config.workingDirectory}' is not an SVN working copy. Make sure you are in a directory that contains an SVN repository or run checkout first.`;
-    } else if (error.message.includes('E175002') || error.message.includes('Unable to connect')) {
-      message = `Cannot connect to the SVN repository. Check your internet connection and credentials.`;
-    } else if (error.message.includes('E170001') || error.message.includes('Authentication failed')) {
-      message = `Authentication error. Check your SVN username and password.`;
-    } else if (error.message.includes('E155036') || error.message.includes('working copy locked')) {
-      message = `The working copy is locked. Run 'svn cleanup' to resolve it.`;
-    } else if (error.message.includes('E200030') || error.message.includes('sqlite')) {
-      message = `Working copy database error. Run 'svn cleanup' to repair it.`;
-    } else if (error.stderr && error.stderr.length > 0) {
-      message = `${message}: ${error.stderr}`;
-    } else {
-      message = `${message}: ${error.message}`;
+    if (detail.includes('E155007') || detail.includes('not a working copy')) {
+      hint = `Hint: that path is not in the working copy. Either '${this.config.workingDirectory}' is not a working copy at all, or the path was never fetched into it — a sparse checkout needs its parent directories pulled at depth empty first.`;
+    } else if (detail.includes('E175002') || detail.includes('Unable to connect')) {
+      hint = `Hint: cannot reach the repository. Check the connection and the credentials.`;
+    } else if (detail.includes('E170001') || detail.includes('Authentication failed')) {
+      hint = `Hint: authentication failed. Check the SVN username and password.`;
+    } else if (detail.includes('E155036') || detail.includes('working copy locked')) {
+      hint = `Hint: the working copy is locked — run svn_cleanup.`;
+    } else if (detail.includes('E200030') || detail.includes('sqlite')) {
+      hint = `Hint: working copy database error — run svn_cleanup.`;
     }
 
-    throw new SvnError(message);
+    throw new SvnError(`Failed to ${operation}: ${detail}${hint ? `\n${hint}` : ''}`);
+  }
+
+  /**
+   * Refuse a second slow command on a path that overlaps one already running.
+   *
+   * Two svn processes on overlapping paths of the same working copy contend for
+   * its lock; losing that contention can leave the copy locked and needing
+   * `cleanup`. Since a detached command answers before it finishes, the caller has
+   * every reason to fire another — so the guard belongs here, not in a docstring.
+   */
+  private assertNoOverlappingJob(target?: string): void {
+    const clash = findOverlappingJob(target);
+    if (clash) {
+      throw new SvnError(
+        `Another SVN operation is still running on an overlapping path — job ${clash.id}, ` +
+        `started ${Math.round((Date.now() - clash.startedAt) / 1000)}s ago on ${clash.target}. ` +
+        `Running a second one would fight it for the working-copy lock. Check it with ` +
+        `svn_job_status and wait for it to finish.`
+      );
+    }
   }
 
   /**
@@ -166,7 +202,9 @@ export class SvnService {
    */
   async getStatus(path?: string, showAll: boolean = false): Promise<SvnResponse<SvnStatus[]>> {
     try {
-      const args = ['status'];
+      // --xml, not the plain columns: see parseStatusOutput for why the column
+      // arithmetic could not hold.
+      const args = ['status', '--xml'];
 
       if (path) {
         // resolveWorkingCopyPath, not normalizePath: it maps a repo-relative
@@ -365,16 +403,23 @@ export class SvnService {
         args.push(normalizePath(path, this.config.workingDirectory));
       }
 
+      const destination = path ? normalizePath(path, this.config.workingDirectory) : undefined;
+      this.assertNoOverlappingJob(destination);
+
       const response = await executeSvnCommand(this.config, args, {
-        timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+        timeout: options.timeout ?? NETWORK_TIMEOUT_MS,
+        detachAfterMs: DETACH_AFTER_MS,
+        target: destination ?? url
       });
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: response.detached ? '' : cleanOutput(response.data as string),
         command: response.command,
         workingDirectory: response.workingDirectory,
-        executionTime: response.executionTime
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
       };
 
     } catch (error: any) {
@@ -390,8 +435,16 @@ export class SvnService {
     options: SvnUpdateOptions = {}
   ): Promise<SvnResponse<string>> {
     try {
-      const args = ['update'];
-      
+      // ⚠ `--parents` is what makes a deep path into a never-fetched branch work:
+      // svn creates the missing parent directories itself, checking them out at
+      // depth empty. Without it the same call dies with E155007, which reads as
+      // "this is not a working copy" and actually means "that path was never
+      // pulled". It is also how a SINGLE FILE is fetched. Harmless when the
+      // parents are already present, so it is unconditional — same as the KMM
+      // branch-manager screen, which has always shelled out
+      // `svn up --parents --set-depth <depth> -r <rev> <paths>`.
+      const args = ['update', '--parents'];
+
       if (options.revision) {
         args.push('--revision', options.revision.toString());
       }
@@ -420,20 +473,39 @@ export class SvnService {
         args.push('--set-depth', options.setDepth);
       }
 
+      const target = path ? resolveWorkingCopyPath(path, this.config) : this.config.workingDirectory;
       if (path) {
-        args.push(resolveWorkingCopyPath(path, this.config));
+        args.push(target!);
       }
 
+      this.assertNoOverlappingJob(target);
+
       const response = await executeSvnCommand(this.config, args, {
-        timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+        timeout: options.timeout ?? NETWORK_TIMEOUT_MS,
+        detachAfterMs: DETACH_AFTER_MS,
+        target
       });
+
+      // The price of `--parents`: a path svn cannot reach is skipped with exit 0
+      // instead of failing. Left alone, a wrong path would answer "completed".
+      if (!response.detached) {
+        const skipped = skippedTargetReason(response.data as string, target);
+        if (skipped) {
+          throw new SvnError(
+            `svn skipped the requested path instead of updating it — ${skipped}. ` +
+            `Nothing was fetched. Check that '${path}' exists in the repository at this revision.`
+          );
+        }
+      }
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: response.detached ? '' : cleanOutput(response.data as string),
         command: response.command,
         workingDirectory: response.workingDirectory,
-        executionTime: response.executionTime
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
       };
 
     } catch (error: any) {
@@ -547,18 +619,27 @@ export class SvnService {
         args.push('--no-unlock');
       }
 
-      args.push(...targets.map(p => resolveWorkingCopyPath(p, this.config)));
+      const resolvedTargets = targets.map(p => resolveWorkingCopyPath(p, this.config));
+      args.push(...resolvedTargets);
+
+      for (const t of resolvedTargets) this.assertNoOverlappingJob(t);
 
       const response = await executeSvnCommand(this.config, args, {
-        timeout: options.timeout
+        timeout: options.timeout,
+        // A commit reported as failed and then repeated is a DOUBLE commit. Better
+        // to answer "still running" and have the caller verify with svn_log.
+        detachAfterMs: DETACH_AFTER_MS,
+        target: resolvedTargets[0]
       });
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: response.detached ? '' : cleanOutput(response.data as string),
         command: response.command,
         workingDirectory: response.workingDirectory,
-        executionTime: response.executionTime
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
       };
 
     } catch (error: any) {

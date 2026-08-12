@@ -242,6 +242,41 @@ pointed at the repository instead of at the path.
 Working-copy-only commands (`svn_status`, `svn_delete`) also accept a repo-relative path (`/trunk/x.sql`)
 and map it into the working copy; they refuse a URL, because svn does not accept one for them.
 
+### Long operations are detached, not failed
+
+There is a request timeout **above** this server: the MCP client abandons a call at around 60 s, and no
+server-side setting reaches it. A real `svn update --set-depth infinity` on a module branch (measured:
+2378 files, 52.5 MB) runs past that.
+
+Before, such a call surfaced as `MCP error -32001: Request timed out` while svn carried on and finished
+successfully — an operation that **worked**, reported as a failure. That is worse than failing: the
+obvious reaction is to retry on top of a state that is already fine, and a second svn contends with the
+first for the working-copy lock.
+
+So `svn_checkout`, `svn_update`, `svn_commit` and `svn_cleanup` **detach** after 30 s: they answer
+immediately that the work is still running, leave the process alone, and hand back a job id.
+
+- `svn_job_status` reports a job's state, elapsed time, exit code and the tail of its output; called
+  with no id it lists recent jobs.
+- Detached is **not** a result. When a job reports done, confirm the effect with `svn_info` / `svn_log`
+  on the target — the exit code says the command ended, not that the outcome is what you wanted.
+- Starting a second operation on a path that overlaps a running job is **refused**, naming the job.
+  That is what keeps two svn processes from fighting over the same working copy.
+- Jobs live in memory, so a server restart forgets them. That is not evidence of failure: verify the
+  target directly.
+
+**Prefer the smallest scope.** Measured on the same CT-e branch: `Oracle/Objetos/Funcoes` alone is
+27 files and 4.5 MB, done inline in **2 s**; the whole branch is 2376 files and 52.8 MB, and detaches for
+**2 min 19 s**. Twelve times less data, and no async cycle to babysit. For a single file, point `path`
+straight at the file with `setDepth: 'infinity'`.
+
+`svn_update` always passes **`--parents`**, which is what makes a deep path into a never-fetched branch
+work: svn creates the missing parent directories itself, checking them out at depth empty. Without it the
+same call fails with `E155007: None of the targets are working copies` — which reads as "this is not a
+working copy" and actually means "that path was never pulled". Measured: one 730 KB file out of a branch
+absent from the working copy, in ~1 s, with nothing else fetched. It is the same invocation the KMM
+branch-manager screen has always used (`SVNBranchManager.doUpdateCli`).
+
 `svn_checkout` and `svn_update` default to a **300 s** timeout instead of the global 30 s — fetching a
 real module branch over the network routinely needs more, and the timeout kills the process with a
 signal that gives no hint that time was the cause. Every slow command also takes a per-call `timeout`.
