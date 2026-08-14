@@ -2,7 +2,7 @@ import { spawn, SpawnOptions } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
-import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SvnListEntry, SVN_STATUS_CODES } from './types.js';
+import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SvnChangedPath, SvnListEntry, SVN_STATUS_CODES } from './types.js';
 import iconv from 'iconv-lite';
 import { registerJob, appendJobOutput, finishJob } from './jobs.js';
 
@@ -500,6 +500,89 @@ export function skippedTargetReason(output: string, target?: string): string | u
 }
 
 /**
+ * What these bytes actually are, and how many of them are non-ASCII.
+ *
+ * ⚠ This exists to be reported before anyone edits the file. Every web file in
+ * this tree is latin1 — `cfc_emissao_documentos.cfc` carries 269 bytes >= 0x80 in
+ * its comments — and editing it through a tool that assumes UTF-8 rewrites all of
+ * them. A 335 KB file corrupted in a client's branch is worse than the bug being
+ * fixed, so the check cannot depend on somebody remembering to run it.
+ */
+export function describeEncoding(bytes: Buffer): { isUtf8: boolean; highBytes: number; note: string } {
+  let highBytes = 0;
+  for (const byte of bytes) if (byte >= 0x80) highBytes += 1;
+
+  let isUtf8 = true;
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    isUtf8 = false;
+  }
+
+  const note = highBytes === 0
+    ? 'ASCII only (safe to edit as text)'
+    : isUtf8
+      ? `UTF-8 (${highBytes} bytes >= 0x80)`
+      : `NOT UTF-8, treat as latin1 (${highBytes} bytes >= 0x80) — edit byte-exact or those bytes will be rewritten`;
+
+  return { isUtf8, highBytes, note };
+}
+
+/** Lines matching `pattern`, 1-based, optionally with surrounding context. */
+export function matchLines(
+  text: string,
+  pattern: string,
+  contextLines = 0
+): Array<{ line: number; content: string }> {
+  const regex = new RegExp(pattern);
+  const lines = text.split(/\r?\n/);
+  const keep = new Set<number>();
+
+  lines.forEach((content, index) => {
+    if (!regex.test(content)) return;
+    const from = Math.max(0, index - contextLines);
+    const to = Math.min(lines.length - 1, index + contextLines);
+    for (let i = from; i <= to; i++) keep.add(i);
+  });
+
+  return [...keep].sort((a, b) => a - b).map(index => ({ line: index + 1, content: lines[index] }));
+}
+
+/**
+ * Parse `svn blame --xml` into line number → author/revision/date.
+ *
+ * ⚠ The plain-text form is not an option: it pads the author into a fixed
+ * 10-character column, turning `fioravante.manfron` into `fioravante`. Truncated
+ * attribution reads like a real answer, which makes it worse than missing data.
+ */
+export function parseBlameOutput(
+  output: string
+): Map<number, { revision: number; author: string; date?: string }> {
+  const attribution = new Map<number, { revision: number; author: string; date?: string }>();
+  if (!output) return attribution;
+
+  const entryPattern = /<entry\b[^>]*\bline-number="(\d+)"[^>]*>([\s\S]*?)<\/entry>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = entryPattern.exec(output)) !== null) {
+    const line = Number(match[1]);
+    const body = match[2];
+    const revision = body.match(/<commit\b[^>]*\brevision="(\d+)"/)?.[1];
+    // A line never committed (locally modified) has no <commit> — skip it rather
+    // than inventing revision 0.
+    if (revision === undefined) continue;
+
+    attribution.set(line, {
+      revision: Number(revision),
+      author: unescapeXml(body.match(/<author>([\s\S]*?)<\/author>/)?.[1] ?? ''),
+      date: body.match(/<date>([\s\S]*?)<\/date>/)?.[1]
+    });
+  }
+
+  return attribution;
+}
+
+/**
  * The part of svn's stderr worth carrying in an error message.
  *
  * Keeps the TAIL: svn prints context first ("Skipped '...'") and the actual
@@ -670,44 +753,59 @@ export function parseStatusOutput(output: string): SvnStatus[] {
 }
 
 /**
- * Parse output of `svn log`
+ * Parse the output of `svn log --xml` (add `-v` to get `changedPaths`).
+ *
+ * ⚠ This used to split the plain-text form on the 72-dash separator and regex the
+ * `r123 | author | date | N lines` header. Same class of fragility as the old
+ * status parser, and with the same consequence: it filled none of the
+ * `changedPaths` the type has always declared — so the **origin of a branch was
+ * unreachable**, which is exactly the check that stops a fix being written against
+ * the wrong code (a GA version branches off `bugfixes`, where the defect may not
+ * exist). The XML form carries `copyfrom-path` / `copyfrom-rev` as attributes.
  */
 export function parseLogOutput(output: string): SvnLogEntry[] {
   const entries: SvnLogEntry[] = [];
+  if (!output) return entries;
 
-  if (!output || output.trim().length === 0) {
-    return entries;
-  }
+  const entryPattern = /<logentry\b[^>]*\brevision="(\d+)"[^>]*>([\s\S]*?)<\/logentry>/g;
+  let match: RegExpExecArray | null;
 
-  // Split on the SVN log separator lines
-  const logEntries = output.split(/^-{72}$/gm).filter(entry => entry.trim());
+  while ((match = entryPattern.exec(output)) !== null) {
+    const revision = Number(match[1]);
+    const body = match[2];
 
-  for (const entryText of logEntries) {
-    const lines = entryText.trim().split('\n');
-    if (lines.length < 2) continue;
+    const entry: SvnLogEntry = {
+      revision,
+      author: unescapeXml(body.match(/<author>([\s\S]*?)<\/author>/)?.[1] ?? ''),
+      date: body.match(/<date>([\s\S]*?)<\/date>/)?.[1] ?? '',
+      message: unescapeXml(body.match(/<msg>([\s\S]*?)<\/msg>/)?.[1] ?? '').trim() || 'No message'
+    };
 
-    const headerLine = lines[0];
-    // Flexible header pattern
-    const headerMatch = headerLine.match(/^r(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.*)$/);
-    
-    if (headerMatch) {
-      try {
-        const [, revision, author, date, details] = headerMatch;
-        const message = lines.slice(2).join('\n').trim();
-        
-        entries.push({
-          revision: parseInt(revision, 10),
-          author: author.trim(),
-          date: date.trim(),
-          message: message || 'No message'
-        });
-      } catch (parseError) {
-        console.warn(`Warning: Failed to parse log entry: ${parseError}`);
-        continue;
-      }
+    // Only present with `-v`. This is where the branch's origin lives:
+    // `copyfrom-path` + `copyfrom-rev` on the `A` entry of a `svn copy`, which is
+    // how a KMM branch is created. Reading it from an attribute beats mining
+    // "(from <path>:<rev>)" out of the plain-text form.
+    const pathPattern = /<path\b([^>]*)>([\s\S]*?)<\/path>/g;
+    let pathMatch: RegExpExecArray | null;
+    const changedPaths: SvnChangedPath[] = [];
+
+    while ((pathMatch = pathPattern.exec(body)) !== null) {
+      const attrs = pathMatch[1];
+      const changed: SvnChangedPath = {
+        action: (attrs.match(/\baction="([^"]*)"/)?.[1] ?? 'M') as SvnChangedPath['action'],
+        path: unescapeXml(pathMatch[2])
+      };
+      const copyFromPath = attrs.match(/\bcopyfrom-path="([^"]*)"/)?.[1];
+      const copyFromRev = attrs.match(/\bcopyfrom-rev="(\d+)"/)?.[1];
+      if (copyFromPath) changed.copyFromPath = unescapeXml(copyFromPath);
+      if (copyFromRev) changed.copyFromRev = Number(copyFromRev);
+      changedPaths.push(changed);
     }
+
+    if (changedPaths.length) entry.changedPaths = changedPaths;
+    entries.push(entry);
   }
-  
+
   return entries;
 }
 

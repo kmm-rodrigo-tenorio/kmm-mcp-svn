@@ -234,15 +234,20 @@ server.tool(
 // 4. Get change history
 server.tool(
   "svn_log",
-  "Show the commit history of the repository. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured).",
+  "Show the commit history of the repository. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured). Use `stopOnCopy` to get a BRANCH'S OWN revisions instead of everything it inherited from the line it was copied from, and `verbose` to see where it was copied from.",
   {
     path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
     limit: z.number().optional().default(10).describe("Maximum number of entries"),
-    revision: z.string().optional().describe("Specific revision or range (e.g. 100:200)")
+    revision: z.string().optional().describe("Specific revision or range (e.g. 100:200)"),
+    stopOnCopy: z.boolean().optional().describe("Stop at the revision that created the branch. This is how you review a branch: without it, a branch cut from an old baseline answers with the baseline's whole history. The OLDEST entry returned is the copy itself — exclude it, it is not anyone's work."),
+    verbose: z.boolean().optional().describe("Include changed paths, and for a copy the origin path and revision. Combine with `stopOnCopy` to prove which line a branch came from — a released version branches off `bugfixes`, where a defect present in the client's own branch may not exist at all.")
   },
   async (args) => {
     try {
-      const result = await getSvnService().getLog(args.path, args.limit, args.revision);
+      const result = await getSvnService().getLog(args.path, args.limit, args.revision, {
+        stopOnCopy: args.stopOnCopy,
+        verbose: args.verbose
+      });
       const logEntries = result.data!;
 
       if (logEntries.length === 0) {
@@ -252,13 +257,21 @@ server.tool(
       }
 
       const logText = `📚 **SVN History** (${logEntries.length} entries)\n\n` +
-        logEntries.map((entry, index) =>
-          `**${index + 1}. Revision ${entry.revision}**\n` +
-          `👤 **Author:** ${entry.author}\n` +
-          `📅 **Date:** ${entry.date}\n` +
-          `💬 **Message:** ${entry.message || 'No message'}\n` +
-          `---`
-        ).join('\n\n') +
+        logEntries.map((entry, index) => {
+          const copied = entry.changedPaths?.find(p => p.copyFromPath);
+          return `**${index + 1}. Revision ${entry.revision}**\n` +
+            `👤 **Author:** ${entry.author}\n` +
+            `📅 **Date:** ${entry.date}\n` +
+            `💬 **Message:** ${entry.message || 'No message'}\n` +
+            (copied
+              ? `🌱 **Copied from:** ${copied.copyFromPath}@${copied.copyFromRev} → ${copied.path}\n`
+              : '') +
+            (entry.changedPaths?.length
+              ? `📁 **Paths (${entry.changedPaths.length}):**\n` +
+                entry.changedPaths.map(p => `   ${p.action}  ${p.path}`).join('\n') + '\n'
+              : '') +
+            `---`;
+        }).join('\n\n') +
         `\n**Execution Time:** ${formatDuration(result.executionTime || 0)}`;
 
       return {
@@ -275,15 +288,20 @@ server.tool(
 // 5. View differences
 server.tool(
   "svn_diff",
-  "Show differences between file revisions. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured).",
+  "Show differences between file revisions. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured). To review a branch, diff its own revisions one by one with `changeRevision` — NOT the branch against its baseline, which is dominated by the baseline's own evolution (measured: 1272 files on a 3-year-old CT-e branch).",
   {
     path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
     oldRevision: z.string().optional().describe("Old revision"),
-    newRevision: z.string().optional().describe("New revision")
+    newRevision: z.string().optional().describe("New revision"),
+    changeRevision: z.number().int().positive().optional().describe("What this single revision changed (svn --change). Equivalent to the range N-1:N, without the arithmetic. Takes precedence over oldRevision/newRevision."),
+    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000 — a diff can be network-bound.")
   },
   async (args) => {
     try {
-      const result = await getSvnService().getDiff(args.path, args.oldRevision, args.newRevision);
+      const result = await getSvnService().getDiff(args.path, args.oldRevision, args.newRevision, {
+        changeRevision: args.changeRevision,
+        timeout: args.timeout
+      });
       const diffOutput = result.data!;
 
       if (!diffOutput || diffOutput.trim().length === 0) {
@@ -738,7 +756,7 @@ server.tool(
 // 13. Show the contents of a versioned file (svn cat)
 server.tool(
   "svn_cat",
-  "Show the contents of a versioned file. Target may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured, so you can just pass '/trunk/path/to/file.sql').",
+  "Show the contents of a versioned file. Target may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured, so you can just pass '/trunk/path/to/file.sql'). For a REAL source file here (hundreds of KB) do not pull it inline: use `pattern` to get only the lines you need, or `saveTo` to put it on disk. Both also report the file's ENCODING, which you must know before editing — the web files in this tree are latin1, and editing them as UTF-8 rewrites every accented byte.",
   {
     target: z.string().describe("Local path, full URL, or repo-relative path like '/trunk/foo.sql'"),
     revision: z.union([
@@ -748,11 +766,21 @@ server.tool(
       z.literal("COMMITTED"),
       z.literal("PREV"),
       z.string()
-    ]).optional().describe("Revision to query (defaults to HEAD/BASE depending on context)")
+    ]).optional().describe("Revision to query (defaults to HEAD/BASE depending on context)"),
+    saveTo: z.string().optional().describe("Write the file here instead of returning it. The answer carries the path, the byte count and the detected encoding. svn writes the bytes itself, so the content is byte-exact."),
+    pattern: z.string().optional().describe("Return only the lines matching this regex, each with its line number. This is how you inspect a large file without spending the whole context on it."),
+    contextLines: z.number().int().min(0).max(50).optional().describe("Lines of context around each `pattern` match."),
+    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000.")
   },
   async (args) => {
     try {
-      const result = await getSvnService().cat(args.target, { revision: args.revision });
+      const result = await getSvnService().cat(args.target, {
+        revision: args.revision,
+        saveTo: args.saveTo,
+        pattern: args.pattern,
+        contextLines: args.contextLines,
+        timeout: args.timeout
+      });
       const content = result.data ?? '';
 
       const revisionLabel = args.revision !== undefined ? String(args.revision) : 'HEAD/BASE';
@@ -766,8 +794,79 @@ server.tool(
         };
       }
 
+      // With saveTo/pattern the payload is already a report, not file content —
+      // wrapping it in a code fence would just add noise.
+      const body = (args.saveTo || args.pattern) ? content : `\`\`\`\n${content}\n\`\`\``;
+
       return {
-        content: [{ type: "text", text: header + `\`\`\`\n${content}\n\`\`\`` }],
+        content: [{ type: "text", text: header + body }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `❌ **Error:** ${error.message}` }],
+      };
+    }
+  }
+);
+
+// 13b. Line-by-line authorship (svn blame)
+server.tool(
+  "svn_blame",
+  "Who last changed each line, and in which revision. Use it to date and attribute a defect — the difference between \"this block is wrong\" and \"it arrived in r640877, in this commit, alongside these other changes\". ALWAYS narrow the output with `startLine`/`endLine` or `pattern`: a real source file here is thousands of lines and blaming all of them is unusable. Author names come from svn's XML form, so they are complete — the plain text form pads them into a 10-character column and would report `fioravante.manfron` as `fioravante`.",
+  {
+    target: z.string().describe("Local path, full URL, or repo-relative path like '/trunk/foo.cfc'"),
+    revision: z.union([
+      z.number(),
+      z.literal("HEAD"),
+      z.literal("BASE"),
+      z.literal("COMMITTED"),
+      z.literal("PREV"),
+      z.string()
+    ]).optional().describe("Revision to blame (defaults to HEAD/BASE depending on context)"),
+    startLine: z.number().int().positive().optional().describe("First line to report (1-based, inclusive)"),
+    endLine: z.number().int().positive().optional().describe("Last line to report (inclusive)"),
+    pattern: z.string().optional().describe("Instead of a line range, report only lines matching this regex. Takes precedence over the range."),
+    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000.")
+  },
+  async (args) => {
+    try {
+      const result = await getSvnService().blame(args.target, {
+        revision: args.revision,
+        startLine: args.startLine,
+        endLine: args.endLine,
+        pattern: args.pattern,
+        timeout: args.timeout
+      });
+      const lines = result.data!;
+
+      if (lines.length === 0) {
+        return {
+          content: [{ type: "text", text: "🔍 **No lines matched** — check the range or the pattern." }],
+        };
+      }
+
+      const scope = args.pattern
+        ? `pattern /${args.pattern}/`
+        : `lines ${args.startLine ?? 1}–${args.endLine ?? 'end'}`;
+
+      // One revision across the whole slice is worth saying out loud: it means the
+      // block arrived in a single commit, which is the usual shape of a defect.
+      const revisions = [...new Set(lines.map(l => l.revision))];
+      const summary = revisions.length === 1
+        ? `\n**All ${lines.length} lines come from r${revisions[0]} (${lines[0].author}).**\n`
+        : `\n**${revisions.length} distinct revisions:** ${revisions.map(r => `r${r}`).join(', ')}\n`;
+
+      const body = lines
+        .map(l => `r${l.revision}  ${l.author}  ${String(l.lineNumber).padStart(5)} | ${l.content}`)
+        .join('\n');
+
+      const text = `🔍 **Blame of ${args.target}** (${scope})\n\n` +
+        `**Command:** ${result.command}\n` +
+        `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n` +
+        summary + `\n\`\`\`\n${body}\n\`\`\``;
+
+      return {
+        content: [{ type: "text", text }],
       };
     } catch (error: any) {
       return {
@@ -930,6 +1029,7 @@ async function runServer() {
       "svn_revert",
       "svn_cleanup",
       "svn_cat",
+      "svn_blame",
       "svn_list",
       "svn_clear_credentials"
     ]);

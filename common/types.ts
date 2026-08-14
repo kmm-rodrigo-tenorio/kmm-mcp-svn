@@ -270,6 +270,44 @@ export interface SvnExportOptions {
 
 export interface SvnCatOptions {
   revision?: number | 'HEAD' | 'BASE' | 'COMMITTED' | 'PREV' | string;
+  /**
+   * Write the content to this file instead of returning it. The answer carries the
+   * path, the size and the detected encoding — a real source file here is hundreds
+   * of KB, and returning it inline spends the caller's whole context on one read.
+   */
+  saveTo?: string;
+  /** Return only the lines matching this regex, each with its line number. */
+  pattern?: string;
+  /** Lines of context around each `pattern` match. */
+  contextLines?: number;
+  timeout?: number;
+}
+
+export interface SvnLogOptions {
+  /**
+   * Stop at the revision that created this branch, so the answer is the branch's
+   * OWN history rather than everything inherited from the line it was copied from.
+   */
+  stopOnCopy?: boolean;
+  /** Include changed paths, and with them a copy's `copyfrom-path`/`copyfrom-rev`. */
+  verbose?: boolean;
+  timeout?: number;
+}
+
+export interface SvnDiffOptions {
+  /** What a single revision changed — `svn diff --change N`, i.e. `-r N-1:N`. */
+  changeRevision?: number;
+  timeout?: number;
+}
+
+export interface SvnBlameOptions {
+  revision?: number | 'HEAD' | 'BASE' | 'COMMITTED' | 'PREV' | string;
+  /** 1-based, inclusive. Blame of a whole large file is not usable in an answer. */
+  startLine?: number;
+  endLine?: number;
+  /** Alternative to the line range: only lines matching this regex. */
+  pattern?: string;
+  timeout?: number;
 }
 
 export interface SvnListOptions {

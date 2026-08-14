@@ -277,6 +277,30 @@ working copy" and actually means "that path was never pulled". Measured: one 730
 absent from the working copy, in ~1 s, with nothing else fetched. It is the same invocation the KMM
 branch-manager screen has always used (`SVNBranchManager.doUpdateCli`).
 
+### Reading a branch, and reading a file that is too big to read
+
+Four tools exist for reviewing work without dragging it through the answer:
+
+- **`svn_log` with `stopOnCopy`** returns a branch's OWN revisions. Without it a branch cut from an
+  old baseline answers with the baseline's entire history. The **oldest** entry returned is the copy
+  that created the branch — exclude it, it is not anyone's work. Add `verbose` and the copy carries
+  `copyfrom-path`/`copyfrom-rev`: that is how you prove which line a branch came from, and a released
+  version branches off `bugfixes`, where a defect present in the client's branch may not exist at all.
+- **`svn_diff` with `changeRevision`** is what one revision changed (`--change`, i.e. `-r N-1:N`
+  without the arithmetic). Review a branch revision by revision. ⚠ Do **not** diff a branch against
+  its baseline: measured on a 3-year-old CT-e branch, that is 1272 files, almost all of it the
+  baseline's own evolution.
+- **`svn_blame`** dates and attributes a line. Always narrow it with `startLine`/`endLine` or
+  `pattern`. Authors come from svn's XML form because the plain text form pads them into a
+  10-character column — it reports `fioravante.manfron` as `fioravante`, and a truncated username
+  looks like a real answer.
+- **`svn_cat` with `pattern` or `saveTo`** for real source files, which run to hundreds of KB.
+  `pattern` returns only matching lines with their numbers; `saveTo` writes the file and returns the
+  path. Both report the **encoding**, which you need before editing: every web file in this tree is
+  latin1 (`cfc_emissao_documentos.cfc` carries 269 bytes ≥ 0x80), and editing one as UTF-8 rewrites
+  all of them. `saveTo` uses `svn export`, so svn writes the bytes itself — piping `svn cat` through
+  a re-encoding step is exactly what turns those 269 bytes into 807.
+
 `svn_checkout` and `svn_update` default to a **300 s** timeout instead of the global 30 s — fetching a
 real module branch over the network routinely needs more, and the timeout kills the process with a
 signal that gives no hint that time was the cause. Every slow command also takes a per-call `timeout`.

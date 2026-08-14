@@ -109,10 +109,24 @@ describe('timeout — the network commands get their own default', () => {
     expect(NETWORK_TIMEOUT_MS).toBeGreaterThan(createSvnConfig().timeout!);
   });
 
-  it('checkout and update apply it, and it stays overridable per call', () => {
+  it('every network-bound method applies it, and it stays overridable per call', () => {
+    // Was a count of occurrences, which broke the moment a NEW network command
+    // adopted the same (correct) pattern. Asserting per method says what is meant:
+    // these commands go over the wire, so none of them may sit on the 30s global
+    // default. Adding another one correctly no longer fails the test; a listed one
+    // losing its per-call timeout still does.
     const serviceSrc = fs.readFileSync(path.join(process.cwd(), 'tools', 'svn-service.ts'), 'utf8');
-    const uses = serviceSrc.match(/timeout: options\.timeout \?\? NETWORK_TIMEOUT_MS/g) ?? [];
-    expect(uses.length).toBe(2);
+    const methodBody = (signature: string): string => {
+      const from = serviceSrc.indexOf(signature);
+      expect(from).toBeGreaterThan(-1);
+      const rest = serviceSrc.slice(from);
+      const next = rest.indexOf('\n  /**', 10);
+      return next === -1 ? rest : rest.slice(0, next);
+    };
+
+    for (const signature of ['async checkout(', 'async update(', 'async getDiff(', 'async blame(', 'private async fetchContent(']) {
+      expect(methodBody(signature)).toMatch(/timeout(:| \?\?)[^\n]*NETWORK_TIMEOUT_MS/);
+    }
   });
 
   it('the timeout message points at the fix instead of just reporting the number', () => {

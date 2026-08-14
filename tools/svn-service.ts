@@ -10,6 +10,10 @@ import {
   SvnAddOptions,
   SvnDeleteOptions,
   SvnCatOptions,
+  SvnLogOptions,
+  SvnDiffOptions,
+  SvnBlameOptions,
+  SvnBlameLine,
   SvnListOptions,
   SvnListEntry,
   SvnError
@@ -32,10 +36,17 @@ import {
   cleanOutput,
   formatDuration,
   clearSvnCredentials,
-  skippedTargetReason
+  skippedTargetReason,
+  describeEncoding,
+  matchLines,
+  parseBlameOutput
 } from '../common/utils.js';
 
 import { findOverlappingJob } from '../common/jobs.js';
+
+import * as fs from 'fs';
+import * as os from 'os';
+import * as nodePath from 'path';
 
 /**
  * Default timeout for the network-bound commands (checkout, update), in ms.
@@ -251,10 +262,13 @@ export class SvnService {
   async getLog(
     path?: string,
     limit?: number,
-    revision?: string
+    revision?: string,
+    options: SvnLogOptions = {}
   ): Promise<SvnResponse<SvnLogEntry[]>> {
     try {
-      const args = ['log'];
+      // `--xml` is not optional here: the plain-text form has no reliable place to
+      // read a copy's origin from, and that origin is a required check.
+      const args = ['log', '--xml'];
 
       if (limit && limit > 0) {
         args.push('--limit', limit.toString());
@@ -262,6 +276,19 @@ export class SvnService {
 
       if (revision) {
         args.push('--revision', revision);
+      }
+
+      // Stops at the revision that created the branch, so what comes back is the
+      // branch's OWN history instead of everything it inherited from the line it
+      // was copied from. Without it, a branch cut from a 3-year-old baseline
+      // answers with the baseline's entire log.
+      if (options.stopOnCopy) {
+        args.push('--stop-on-copy');
+      }
+
+      // Brings `<paths>`, and with it `copyfrom-path`/`copyfrom-rev` — the origin.
+      if (options.verbose) {
+        args.push('--verbose');
       }
 
       if (path) {
@@ -329,13 +356,23 @@ export class SvnService {
   async getDiff(
     path?: string,
     oldRevision?: string,
-    newRevision?: string
+    newRevision?: string,
+    options: SvnDiffOptions = {}
   ): Promise<SvnResponse<string>> {
     try {
       const args = ['diff'];
       const resolved = path ? resolveTarget(path, this.config).value : undefined;
 
-      if (oldRevision && newRevision) {
+      // What ONE revision changed. Reviewing a KMM branch means walking its own
+      // revisions, and expressing that as the range `N-1:N` is arithmetic the
+      // caller has to get right every time — `--change` is the same thing without
+      // the subtraction.
+      if (options.changeRevision !== undefined) {
+        args.push('--change', String(options.changeRevision));
+        if (resolved) {
+          args.push(resolved);
+        }
+      } else if (oldRevision && newRevision) {
         const base = resolved || '.';
         args.push('--old', `${base}@${oldRevision}`);
         args.push('--new', `${base}@${newRevision}`);
@@ -348,7 +385,11 @@ export class SvnService {
         args.push(resolved);
       }
 
-      const response = await executeSvnCommand(this.config, args);
+      // A diff can be network-bound: measured 10s for a branch against its
+      // baseline, which the global 30s default would eventually cut down.
+      const response = await executeSvnCommand(this.config, args, {
+        timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+      });
 
       return {
         success: true,
@@ -929,26 +970,178 @@ export class SvnService {
         throw new SvnError('Target path or URL is required for svn cat');
       }
 
-      const args = ['cat'];
+      // Whole-file inline: only when nobody asked for a file or a filter.
+      if (!options.saveTo && !options.pattern) {
+        const args = ['cat'];
+        if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
+          args.push('--revision', String(options.revision));
+        }
+        args.push(resolveTarget(target, this.config).value);
 
-      if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
-        args.push('--revision', String(options.revision));
+        const response = await executeSvnCommand(this.config, args, {
+          timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+        });
+
+        return {
+          success: true,
+          data: cleanOutput(response.data as string),
+          command: response.command,
+          workingDirectory: response.workingDirectory,
+          executionTime: response.executionTime
+        };
       }
 
-      args.push(resolveTarget(target, this.config).value);
+      const fetched = await this.fetchContent(target, options.revision, options.saveTo, options.timeout);
+      const header =
+        `${fetched.savedTo ? `Saved to: ${fetched.savedTo}\n` : ''}` +
+        `Bytes: ${fetched.byteLength}\n` +
+        `Encoding: ${fetched.encodingNote}\n`;
 
-      const response = await executeSvnCommand(this.config, args);
+      let body: string;
+      if (options.pattern) {
+        const matches = matchLines(fetched.text, options.pattern, options.contextLines ?? 0);
+        body = matches.length
+          ? `Matching lines (${matches.length}):\n` +
+            matches.map(m => `${m.line}: ${m.content}`).join('\n')
+          : `No line matched /${options.pattern}/.`;
+      } else {
+        // saveTo without a pattern: the content is on disk on purpose, so the
+        // answer stays small. Returning it here would defeat the point.
+        body = 'Content written to disk; not included in this answer.';
+      }
+
+      if (!fetched.savedTo) fs.rmSync(fetched.tempPath!, { force: true });
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: `${header}\n${body}`,
+        command: fetched.command,
+        workingDirectory: this.config.workingDirectory!,
+        executionTime: fetched.executionTime
+      };
+
+    } catch (error: any) {
+      this.handleSvnError(error, 'get file contents (svn cat)');
+    }
+  }
+
+  /**
+   * Materialize one versioned file and read it back as bytes.
+   *
+   * ⚠ Uses `svn export`, not `svn cat`, and that is the whole point: the command
+   * pipeline decodes stdout as UTF-8, so a latin1 source file — which every web
+   * file here is — comes back with every accented byte replaced by U+FFFD. Writing
+   * that to disk would corrupt the file, silently. Measured on
+   * `cfc_emissao_documentos.cfc`: 269 accented bytes became 807 (3 bytes per
+   * replacement char) the one time I captured `svn cat` through a re-encoding
+   * redirect. Letting svn write the file keeps the repository's exact bytes.
+   */
+  private async fetchContent(
+    target: string,
+    revision?: SvnCatOptions['revision'],
+    saveTo?: string,
+    timeout?: number
+  ): Promise<{
+    savedTo?: string;
+    tempPath?: string;
+    byteLength: number;
+    encodingNote: string;
+    text: string;
+    command: string;
+    executionTime?: number;
+  }> {
+    const destination = saveTo
+      ? nodePath.resolve(saveTo)
+      : nodePath.join(fs.mkdtempSync(nodePath.join(os.tmpdir(), 'svncat-')), 'content');
+
+    const args = ['export', '--force'];
+    if (revision !== undefined && revision !== null && revision !== '') {
+      args.push('--revision', String(revision));
+    }
+    args.push(resolveTarget(target, this.config).value, destination);
+
+    const response = await executeSvnCommand(this.config, args, {
+      timeout: timeout ?? NETWORK_TIMEOUT_MS
+    });
+
+    const bytes = fs.readFileSync(destination);
+    const probe = describeEncoding(bytes);
+
+    return {
+      savedTo: saveTo ? destination : undefined,
+      tempPath: saveTo ? undefined : destination,
+      byteLength: bytes.length,
+      encodingNote: probe.note,
+      // Decode with what the bytes actually are, so a matched line comes back
+      // readable instead of peppered with replacement characters.
+      text: probe.isUtf8 ? bytes.toString('utf8') : bytes.toString('latin1'),
+      command: response.command,
+      executionTime: response.executionTime
+    };
+  }
+
+  /**
+   * Line-by-line authorship (svn blame).
+   *
+   * ⚠ Reads attribution from `--xml`, never from the plain form: the text output
+   * pads the author into a fixed 10-character column, so `fioravante.manfron`
+   * arrives as `fioravante` and `rodrigo.tenorio` as `rodrigo.te`. A truncated
+   * username is worse than none — it looks like a real answer.
+   *
+   * The XML carries no line content, so the content comes from the file itself at
+   * the same revision, and the two are joined by line number.
+   */
+  async blame(target: string, options: SvnBlameOptions = {}): Promise<SvnResponse<SvnBlameLine[]>> {
+    try {
+      if (!target || typeof target !== 'string') {
+        throw new SvnError('Target path or URL is required for svn blame');
+      }
+
+      const args = ['blame', '--xml'];
+      if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
+        args.push('--revision', String(options.revision));
+      }
+      args.push(resolveTarget(target, this.config).value);
+
+      const response = await executeSvnCommand(this.config, args, {
+        timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+      });
+
+      const attribution = parseBlameOutput(response.data as string);
+      const fetched = await this.fetchContent(target, options.revision, undefined, options.timeout);
+      const lines = fetched.text.split(/\r?\n/);
+      fs.rmSync(nodePath.dirname(fetched.tempPath!), { recursive: true, force: true });
+
+      const wanted = (lineNumber: number, content: string): boolean => {
+        if (options.pattern) return new RegExp(options.pattern).test(content);
+        const from = options.startLine ?? 1;
+        const to = options.endLine ?? Number.MAX_SAFE_INTEGER;
+        return lineNumber >= from && lineNumber <= to;
+      };
+
+      const blamed: SvnBlameLine[] = [];
+      for (const [lineNumber, meta] of attribution) {
+        const content = lines[lineNumber - 1] ?? '';
+        if (!wanted(lineNumber, content)) continue;
+        blamed.push({
+          lineNumber,
+          revision: meta.revision,
+          author: meta.author,
+          date: meta.date ?? '',
+          content
+        });
+      }
+
+      return {
+        success: true,
+        data: blamed,
         command: response.command,
         workingDirectory: response.workingDirectory,
         executionTime: response.executionTime
       };
 
     } catch (error: any) {
-      this.handleSvnError(error, 'get file contents (svn cat)');
+      this.handleSvnError(error, 'get line authorship (svn blame)');
     }
   }
 
