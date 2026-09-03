@@ -911,6 +911,20 @@ export function validateSvnUrl(url: string): boolean {
 }
 
 /**
+ * Validate an SVN revision argument: a number, one of svn's keywords, or a
+ * `{DATE}` specifier. Anything else is rejected here rather than handed to svn,
+ * which fails deep in its own argument parsing — on Bug-41093 a caller passed the
+ * string `{"$":"HEAD"}` and got `E205000: Syntax error parsing peg revision`,
+ * which names the garbage but not the parameter that carried it.
+ */
+export function validateRevision(revision: string): boolean {
+  // The `{DATE}` branch has to start with a digit: `\{[^{}]+\}` would also accept
+  // `{"$":"HEAD"}`, which is the exact input this guard exists to reject.
+  const svnRevisionPattern = /^(\d+|HEAD|BASE|COMMITTED|PREV|\{\d[\d\-:T .+Z]*\})$/i;
+  return svnRevisionPattern.test(revision.trim());
+}
+
+/**
  * Join a repository base URL with a repo-relative path. Preserves the
  * exact encoding of the inputs — we do not re-encode callers' input.
  */

@@ -30,6 +30,7 @@ import {
   isWorkingCopy,
   normalizePath,
   validatePath,
+  validateRevision,
   validateSvnUrl,
   resolveTarget,
   resolveWorkingCopyPath,
@@ -362,6 +363,17 @@ export class SvnService {
     try {
       const args = ['diff'];
       const resolved = path ? resolveTarget(path, this.config).value : undefined;
+
+      // Reject a malformed revision here instead of letting it reach the peg
+      // syntax, where svn answers `E205000: Syntax error parsing peg revision`
+      // and names the garbage without naming the parameter that carried it.
+      for (const [label, value] of [['oldRevision', oldRevision], ['newRevision', newRevision]] as const) {
+        if (value !== undefined && !validateRevision(value)) {
+          throw new SvnError(
+            `Invalid ${label}: ${value} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}`
+          );
+        }
+      }
 
       // What ONE revision changed. Reviewing a KMM branch means walking its own
       // revisions, and expressing that as the range `N-1:N` is arithmetic the
