@@ -455,6 +455,17 @@ server.tool(
       };
 
       const result = await getSvnService().add(args.paths, options);
+
+      // A operacao pode ter destacado: escreve no wc.db e leva o tempo que
+      // precisar. Sem isto o texto de sucesso sairia com saida vazia e sem
+      // jobId, escondendo que ela continua rodando.
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target: Array.isArray(args.paths) ? args.paths.join(', ') : args.paths, what: 'Add'
+          }) }],
+        };
+      }
       const pathsArray = Array.isArray(args.paths) ? args.paths : [args.paths];
 
       const addText = `➕ **Files Added**\n\n` +
@@ -554,9 +565,16 @@ server.tool(
         };
       }
 
-      const commitText = `✅ **Commit Completed**\n\n` +
+      // ⚠ O commit pode ter ENTRADO e o svn ter saido nao-zero por uma etapa
+      // posterior. Nesse caso o warning e a informacao mais importante da
+      // resposta: sem ele, quem le "Commit Completed" nao sabe que a working
+      // copy ficou por consertar - e quem le "falhou" repetiria o commit.
+      const commitText = (result.warning
+          ? `⚠️ **Commit Completed WITH WARNINGS**\n\n${result.warning}\n\n`
+          : `✅ **Commit Completed**\n\n`) +
         `**Message:** ${args.message}\n` +
         `**Files:** ${args.paths.join(', ')}\n` +
+        (result.committedRevision ? `**Revision:** ${result.committedRevision}\n` : '') +
         `**Command:** ${result.command}\n` +
         `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n\n` +
         `**Output:**\n\`\`\`\n${result.data}\n\`\`\``;
@@ -589,6 +607,17 @@ server.tool(
       };
 
       const result = await getSvnService().delete(args.paths, options);
+
+      // A operacao pode ter destacado: escreve no wc.db e leva o tempo que
+      // precisar. Sem isto o texto de sucesso sairia com saida vazia e sem
+      // jobId, escondendo que ela continua rodando.
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target: Array.isArray(args.paths) ? args.paths.join(', ') : args.paths, what: 'Delete'
+          }) }],
+        };
+      }
       const pathsArray = Array.isArray(args.paths) ? args.paths : [args.paths];
 
       const deleteText = `🗑️ **Files Deleted**\n\n` +
@@ -706,6 +735,17 @@ server.tool(
   async (args) => {
     try {
       const result = await getSvnService().revert(args.paths);
+
+      // A operacao pode ter destacado: escreve no wc.db e leva o tempo que
+      // precisar. Sem isto o texto de sucesso sairia com saida vazia e sem
+      // jobId, escondendo que ela continua rodando.
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target: Array.isArray(args.paths) ? args.paths.join(', ') : args.paths, what: 'Revert'
+          }) }],
+        };
+      }
       const pathsArray = Array.isArray(args.paths) ? args.paths : [args.paths];
 
       const revertText = `↩️ **Changes Reverted**\n\n` +
@@ -735,6 +775,17 @@ server.tool(
   async (args) => {
     try {
       const result = await getSvnService().cleanup(args.path);
+
+      // A operacao pode ter destacado: escreve no wc.db e leva o tempo que
+      // precisar. Sem isto o texto de sucesso sairia com saida vazia e sem
+      // jobId, escondendo que ela continua rodando.
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target: args.path, what: 'Cleanup'
+          }) }],
+        };
+      }
 
       const cleanupText = `🧹 **Cleanup Completed**\n\n` +
         `**Path:** ${args.path || 'Current directory'}\n` +

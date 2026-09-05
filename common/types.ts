@@ -22,6 +22,17 @@ export interface SvnResponse<T = any> {
   workingDirectory: string;
   executionTime?: number;
   /**
+   * The revision the command wrote, when it wrote one. Present even if svn then
+   * exited non-zero — see `warning`.
+   */
+  committedRevision?: number;
+  /**
+   * The operation SUCCEEDED and something after it did not. Distinct from
+   * `error`, which means it did not happen. A caller that retries on `warning`
+   * duplicates work that is already committed.
+   */
+  warning?: string;
+  /**
    * The command outlasted its detach threshold and is STILL RUNNING. Not a
    * failure, and not a partial result: nothing about the outcome is known yet.
    * Look it up with the job id, and verify the effect with `svn info` on the
@@ -34,6 +45,14 @@ export interface SvnResponse<T = any> {
 export class SvnError extends Error {
   code?: number;
   stderr?: string;
+  /**
+   * ⚠ stdout matters on FAILURE too. `svn commit` prints `Committed revision N.`
+   * on stdout and can still exit non-zero when a post-commit step fails — the
+   * commit is in the repository and only the local bookkeeping broke. Dropping
+   * stdout here is what made a successful commit look like a failed one, and a
+   * retry on top of that is a DOUBLE COMMIT.
+   */
+  stdout?: string;
   command?: string;
 
   constructor(message: string) {
@@ -53,6 +72,8 @@ export interface SvnInfo {
   repositoryUuid: string;
   revision: number;
   nodeKind: 'file' | 'directory';
+  /** empty | files | immediates | infinity. Ausente quando o svn nao reporta. */
+  depth?: string;
   schedule: string;
   lastChangedAuthor: string;
   lastChangedRev: number;

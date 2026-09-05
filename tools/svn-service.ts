@@ -276,6 +276,13 @@ export class SvnService {
       }
 
       if (revision) {
+        // Numero, HEAD, BASE, COMMITTED, PREV ou {DATA}. Sem isto, um objeto
+        // serializado vira argumento do svn e o erro nao nomeia o parametro.
+        if (!validateRevision(String(revision))) {
+          throw new SvnError(
+            `Invalid revision: ${revision} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}`
+          );
+        }
         args.push('--revision', revision);
       }
 
@@ -531,6 +538,51 @@ export class SvnService {
         args.push(target!);
       }
 
+      // ⚠ Estreitar profundidade num diretorio JA POVOADO nao e "nao faz nada":
+      // tira os filhos do controle de versao. Os arquivos ficam no disco e o svn
+      // passa a trata-los como nao versionados. Ja custou uma working copy.
+      //
+      // A regra da casa e "leia a profundidade atual antes de mexer". Ate agora
+      // ela era inexecutavel: svn_info nao devolvia Depth. Agora devolve, e a
+      // leitura acontece aqui, uma vez, antes de emitir a escrita.
+      const ESTREITAM = ['empty', 'files', 'immediates', 'exclude'];
+      if (options.setDepth && ESTREITAM.includes(options.setDepth) && !options.force && target) {
+        let atual: string | undefined;
+        try {
+          const info = await this.getInfo(target);
+          atual = (info.data as any)?.depth;
+        } catch (e: any) {
+          // Falhar ao LER nao pode virar permissao para ESCREVER. Duas causas
+          // muito diferentes chegam aqui:
+          //
+          //   - o caminho ainda nao esta na working copy esparsa. E o caso
+          //     legitimo do --set-depth, e seguir e o certo.
+          //   - o wc.db esta travado ou corrompido. Seguir aqui e estreitar
+          //     profundidade as cegas justamente quando a WC ja esta doente -
+          //     que e o cenario que motivou este patch inteiro.
+          const msg = String(e?.message ?? '');
+          const caminhoAindaNaoVersionado = /E155007|E200009|W155010|not a working copy|was not found/i.test(msg);
+          if (!caminhoAindaNaoVersionado) {
+            throw new SvnError(
+              `Refusing --set-depth ${options.setDepth} on ${target}: could not read its current ` +
+              `depth, so narrowing would be blind — and narrowing an already-populated directory ` +
+              `REMOVES its children from version control. Underlying error:\n${msg}\n` +
+              `Fix the working copy first, or pass force: true if you are certain.`
+            );
+          }
+          atual = undefined;
+        }
+        if (atual === 'infinity') {
+          throw new SvnError(
+            `Refusing --set-depth ${options.setDepth} on ${target}: it is currently at depth ` +
+            `'infinity', so narrowing would REMOVE its children from version control (files stay ` +
+            `on disk, svn stops tracking them). If that is the intent, pass force: true. If the ` +
+            `goal was to bring a new path into a sparse working copy, target that path instead — ` +
+            `svn_update already passes --parents.`
+          );
+        }
+      }
+
       this.assertNoOverlappingJob(target);
 
       const response = await executeSvnCommand(this.config, args, {
@@ -608,14 +660,29 @@ export class SvnService {
       // Append normalized paths
       args.push(...pathArray.map(p => normalizePath(p, this.config.workingDirectory)));
 
-      const response = await executeSvnCommand(this.config, args);
+      // Mesma guarda das outras detachable: uma segunda escrita disputando o
+
+      // lock da working copy e como se perde o wc.db.
+
+      this.assertNoOverlappingJob(Array.isArray(paths) ? paths.join(', ') : paths);
+
+      const response = await executeSvnCommand(this.config, args, {
+        // Escreve no wc.db, entao nao pode ser morto no meio: numa WC grande
+        // (medido: 722 MB) passa dos 30 s de sobra, e o SIGTERM do timeout aborta
+        // a transacao do SQLite. No caso do cleanup e pior ainda - seria abortar
+        // justamente o comando que existe para reparar aborto.
+        detachAfterMs: DETACH_AFTER_MS,
+        target: Array.isArray(paths) ? paths.join(', ') : paths
+      });
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: response.detached ? '' : cleanOutput(response.data as string),
         command: response.command,
         workingDirectory: response.workingDirectory,
-        executionTime: response.executionTime
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
       };
 
     } catch (error: any) {
@@ -727,14 +794,29 @@ export class SvnService {
       // repository change, so resolveWorkingCopyPath refuses one outright.
       args.push(...pathArray.map(p => resolveWorkingCopyPath(p, this.config)));
 
-      const response = await executeSvnCommand(this.config, args);
+      // Mesma guarda das outras detachable: uma segunda escrita disputando o
+
+      // lock da working copy e como se perde o wc.db.
+
+      this.assertNoOverlappingJob(Array.isArray(paths) ? paths.join(', ') : paths);
+
+      const response = await executeSvnCommand(this.config, args, {
+        // Escreve no wc.db, entao nao pode ser morto no meio: numa WC grande
+        // (medido: 722 MB) passa dos 30 s de sobra, e o SIGTERM do timeout aborta
+        // a transacao do SQLite. No caso do cleanup e pior ainda - seria abortar
+        // justamente o comando que existe para reparar aborto.
+        detachAfterMs: DETACH_AFTER_MS,
+        target: Array.isArray(paths) ? paths.join(', ') : paths
+      });
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: response.detached ? '' : cleanOutput(response.data as string),
         command: response.command,
         workingDirectory: response.workingDirectory,
-        executionTime: response.executionTime
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
       };
 
     } catch (error: any) {
@@ -761,14 +843,29 @@ export class SvnService {
       // Append normalized paths
       args.push(...pathArray.map(p => normalizePath(p, this.config.workingDirectory)));
 
-      const response = await executeSvnCommand(this.config, args);
+      // Mesma guarda das outras detachable: uma segunda escrita disputando o
+
+      // lock da working copy e como se perde o wc.db.
+
+      this.assertNoOverlappingJob(Array.isArray(paths) ? paths.join(', ') : paths);
+
+      const response = await executeSvnCommand(this.config, args, {
+        // Escreve no wc.db, entao nao pode ser morto no meio: numa WC grande
+        // (medido: 722 MB) passa dos 30 s de sobra, e o SIGTERM do timeout aborta
+        // a transacao do SQLite. No caso do cleanup e pior ainda - seria abortar
+        // justamente o comando que existe para reparar aborto.
+        detachAfterMs: DETACH_AFTER_MS,
+        target: Array.isArray(paths) ? paths.join(', ') : paths
+      });
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: response.detached ? '' : cleanOutput(response.data as string),
         command: response.command,
         workingDirectory: response.workingDirectory,
-        executionTime: response.executionTime
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
       };
 
     } catch (error: any) {
@@ -790,14 +887,29 @@ export class SvnService {
         args.push(normalizePath(path, this.config.workingDirectory));
       }
 
-      const response = await executeSvnCommand(this.config, args);
+      // Mesma guarda das outras detachable: uma segunda escrita disputando o
+
+      // lock da working copy e como se perde o wc.db.
+
+      this.assertNoOverlappingJob(path);
+
+      const response = await executeSvnCommand(this.config, args, {
+        // Escreve no wc.db, entao nao pode ser morto no meio: numa WC grande
+        // (medido: 722 MB) passa dos 30 s de sobra, e o SIGTERM do timeout aborta
+        // a transacao do SQLite. No caso do cleanup e pior ainda - seria abortar
+        // justamente o comando que existe para reparar aborto.
+        detachAfterMs: DETACH_AFTER_MS,
+        target: path
+      });
 
       return {
         success: true,
-        data: cleanOutput(response.data as string),
+        data: response.detached ? '' : cleanOutput(response.data as string),
         command: response.command,
         workingDirectory: response.workingDirectory,
-        executionTime: response.executionTime
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
       };
 
     } catch (error: any) {
@@ -986,6 +1098,13 @@ export class SvnService {
       if (!options.saveTo && !options.pattern) {
         const args = ['cat'];
         if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
+          // Numero, HEAD, BASE, COMMITTED, PREV ou {DATA}. Sem isto, um objeto
+          // serializado vira argumento do svn e o erro nao nomeia o parametro.
+          if (!validateRevision(String(options.revision))) {
+            throw new SvnError(
+              `Invalid revision: ${options.revision} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}`
+            );
+          }
           args.push('--revision', String(options.revision));
         }
         args.push(resolveTarget(target, this.config).value);
@@ -1068,6 +1187,13 @@ export class SvnService {
 
     const args = ['export', '--force'];
     if (revision !== undefined && revision !== null && revision !== '') {
+      // Numero, HEAD, BASE, COMMITTED, PREV ou {DATA}. Sem isto, um objeto
+      // serializado vira argumento do svn e o erro nao nomeia o parametro.
+      if (!validateRevision(String(revision))) {
+        throw new SvnError(
+          `Invalid revision: ${revision} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}`
+        );
+      }
       args.push('--revision', String(revision));
     }
     args.push(resolveTarget(target, this.config).value, destination);
@@ -1111,6 +1237,13 @@ export class SvnService {
 
       const args = ['blame', '--xml'];
       if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
+        // Numero, HEAD, BASE, COMMITTED, PREV ou {DATA}. Sem isto, um objeto
+        // serializado vira argumento do svn e o erro nao nomeia o parametro.
+        if (!validateRevision(String(options.revision))) {
+          throw new SvnError(
+            `Invalid revision: ${options.revision} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}`
+          );
+        }
         args.push('--revision', String(options.revision));
       }
       args.push(resolveTarget(target, this.config).value);
@@ -1183,6 +1316,13 @@ export class SvnService {
       }
 
       if (options.revision !== undefined && options.revision !== null && options.revision !== '') {
+        // Numero, HEAD, BASE, COMMITTED, PREV ou {DATA}. Sem isto, um objeto
+        // serializado vira argumento do svn e o erro nao nomeia o parametro.
+        if (!validateRevision(String(options.revision))) {
+          throw new SvnError(
+            `Invalid revision: ${options.revision} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}`
+          );
+        }
         args.push('--revision', String(options.revision));
       }
 

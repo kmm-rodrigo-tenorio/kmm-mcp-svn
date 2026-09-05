@@ -407,7 +407,12 @@ export async function executeSvnCommand(
       stdout += stdoutDecoder.end();
       stderr += stderrDecoder.end();
 
-      if (job) finishJob(job.id, code);
+      // The exit code says how svn felt; the output says what happened. A commit
+      // that wrote its revision and then failed a post-commit step exits non-zero
+      // with the revision already in the repository.
+      const committed = committedRevision(stdout);
+
+      if (job) finishJob(job.id, code, undefined, committed);
 
       // Already detached: the caller was answered long ago. Recording the outcome
       // on the job is all that is left — resolving twice is a no-op, and rejecting
@@ -421,6 +426,23 @@ export async function executeSvnCommand(
         workingDirectory: config.workingDirectory!,
         executionTime
       };
+
+      if (code !== 0 && committed !== undefined) {
+        // ⚠ NEVER retry this. The revision is in the repository; repeating the
+        // command would commit the same work twice. What failed is downstream of
+        // the write — typically the working copy's own bookkeeping, which
+        // `svn cleanup` and `svn update` repair.
+        response.success = true;
+        response.committedRevision = committed;
+        response.warning =
+          `Committed revision ${committed}, but svn exited ${code} — the commit IS in the ` +
+          `repository and must NOT be repeated. Something after the write failed:\n` +
+          `${errorDetail(stderr) || stderr.trim()}\n` +
+          `Verify with svn_log on the target, then repair the working copy.`;
+        response.data = stdout.trim();
+        resolve(response);
+        return;
+      }
 
       if (code === 0) {
         response.data = stdout.trim();
@@ -436,10 +458,10 @@ export async function executeSvnCommand(
         );
         error.code = code || undefined;
         error.stderr = stderr.trim();
+        // stdout travels with the error too: on this path `response` is discarded,
+        // so anything not on the error is lost to the caller.
+        error.stdout = stdout.trim();
         error.command = command;
-
-        response.error = error.message;
-        response.data = stderr.trim();
 
         reject(error);
       }
@@ -596,6 +618,28 @@ export function errorDetail(stderr: string, maxLines = 5, maxChars = 600): strin
 }
 
 /**
+ * The revision an svn command reported as committed, if any.
+ *
+ * ⚠ Read this BEFORE deciding an outcome from the exit code. `svn commit` writes
+ * `Committed revision N.` to stdout and can still exit non-zero when a step
+ * AFTER the write fails:
+ *
+ *     Committed revision 646726.
+ *     svn: E200000: Commit succeeded, but other errors follow:
+ *     svn: E200033: Error bumping revisions post-commit ...
+ *
+ * The revision is in the repository. Treating that as a failure invites a retry,
+ * and a retried commit is a second revision with the same content.
+ *
+ * Anchored to the line start and requiring the trailing period, so the phrase
+ * quoted inside someone's commit message cannot match.
+ */
+export function committedRevision(output: string): number | undefined {
+  const match = output.match(/^Committed revision (\d+)\.\s*$/m);
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
  * Parse SVN XML output
  */
 export function parseXmlOutput(xmlString: string): any {
@@ -655,6 +699,12 @@ export function parseInfoOutput(output: string): SvnInfo {
         break;
       case 'Node Kind':
         info.nodeKind = value as 'file' | 'directory';
+        break;
+      // ⚠ Sem este campo, a regra da casa "leia a profundidade atual antes de
+      // estreitar" era inexecutável pela ferramenta: `svn_info` simplesmente não
+      // devolvia Depth. Estreitar de infinity tira os filhos do versionamento.
+      case 'Depth':
+        info.depth = value;
         break;
       case 'Schedule':
         info.schedule = value;

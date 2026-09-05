@@ -16,7 +16,16 @@
  * to verify is `svn info` on the target, not this registry.
  */
 
-export type SvnJobState = 'running' | 'done' | 'failed';
+/**
+ * `done-with-warnings` is not a nicety. `svn commit` can write the revision and
+ * still exit non-zero when a post-commit step fails — measured: r646726 landed
+ * while svn returned 1 because a concurrent TortoiseSVN cache held the
+ * working-copy SQLite lock during `Error bumping revisions post-commit`.
+ * Reporting that as `failed` invites a retry, and retrying a commit that landed
+ * is a DOUBLE COMMIT. The exit code says how svn felt; the output says what
+ * happened.
+ */
+export type SvnJobState = 'running' | 'done' | 'done-with-warnings' | 'failed';
 
 export interface SvnJob {
   id: string;
@@ -35,6 +44,8 @@ export interface SvnJob {
   finishedAt?: number;
   state: SvnJobState;
   exitCode?: number;
+  /** Set when the output reported a commit, whatever the exit code said. */
+  committedRevision?: number;
   /** Last chunk of stdout. Capped: a checkout prints one line per file. */
   stdoutTail: string;
   stderrTail: string;
@@ -90,12 +101,21 @@ export function appendJobOutput(id: string, stream: 'stdout' | 'stderr', chunk: 
   else job.stderrTail = tail(job.stderrTail, chunk);
 }
 
-export function finishJob(id: string, exitCode: number | null, failureNote?: string): void {
+export function finishJob(
+  id: string,
+  exitCode: number | null,
+  failureNote?: string,
+  /** Revision the command reported as committed, when it did. See SvnJobState. */
+  committedRevision?: number
+): void {
   const job = jobs.get(id);
   if (!job) return;
   job.finishedAt = Date.now();
   job.exitCode = exitCode ?? undefined;
-  job.state = exitCode === 0 ? 'done' : 'failed';
+  job.committedRevision = committedRevision;
+  job.state = exitCode === 0
+    ? 'done'
+    : (committedRevision !== undefined ? 'done-with-warnings' : 'failed');
   if (failureNote) job.stderrTail = tail(job.stderrTail, `\n${failureNote}`);
 }
 
