@@ -337,6 +337,7 @@ export interface SvnListOptions {
   recursive?: boolean;
   depth?: 'empty' | 'files' | 'immediates' | 'infinity';
   includeExternals?: boolean;
+  timeout?: number;
 }
 
 export interface SvnListEntry {

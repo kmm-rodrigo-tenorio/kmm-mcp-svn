@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
@@ -8,6 +8,7 @@ import { z } from "zod";
 import { SvnService, DETACH_AFTER_MS } from "./tools/svn-service.js";
 import { formatDuration } from "./common/utils.js";
 import { getJob, listJobs, SvnJob } from "./common/jobs.js";
+import { timeoutArg, pathAliasArg, pickPath, rejectUnknownArgs } from "./common/tool-args.js";
 
 import { VERSION } from "./common/version.js";
 
@@ -46,6 +47,15 @@ const server = new McpServer({
   version: VERSION,
 });
 
+// Shape de cada tool, guardado no registro para recusar chave desconhecida
+// antes de o SDK descarta-la calada (ver rejectUnknownArgs).
+const toolShapes = new Map<string, z.ZodRawShape>();
+
+function tool<Args extends z.ZodRawShape>(name: string, description: string, shape: Args, cb: ToolCallback<Args>): void {
+  toolShapes.set(name, shape);
+  server.tool(name, description, shape, cb);
+}
+
 // Create SVN service instance (lazy initialization)
 let svnService: SvnService | null = null;
 
@@ -63,7 +73,7 @@ function getSvnService(): SvnService {
 // ----- MCP TOOLS FOR SUBVERSION (SVN) -----
 
 // 1. SVN system health check
-server.tool(
+tool(
   "svn_health_check",
   "Check the health status of the SVN system and working copy",
   {},
@@ -95,7 +105,7 @@ server.tool(
 );
 
 // 1.1. Advanced SVN command diagnostics
-server.tool(
+tool(
   "svn_diagnose",
   "Diagnose specific problems with SVN commands",
   {},
@@ -141,15 +151,17 @@ server.tool(
 );
 
 // 2. Get repository information
-server.tool(
+tool(
   "svn_info",
   "Get detailed information about the working copy or a specific file. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured).",
   {
-    path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'")
+    path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
+    target: pathAliasArg('path')
   },
   async (args) => {
+    const path = pickPath("svn_info", args);
     try {
-      const result = await getSvnService().getInfo(args.path);
+      const result = await getSvnService().getInfo(path);
       const info = result.data!;
 
       const infoText = `📋 **SVN Info**\n\n` +
@@ -178,18 +190,20 @@ server.tool(
 );
 
 // 3. Get file status
-server.tool(
+tool(
   "svn_status",
   "Show the status of files in the working copy. Accepts a local path or a repo-relative path " +
   "(\"/Software/...\"), which is mapped into the working copy. A repository URL is refused — status " +
   "is a working-copy command.",
   {
     path: z.string().optional().describe("Path to query — local, or repo-relative starting with \"/\". Omit and the whole working copy is scanned."),
+    target: pathAliasArg('path'),
     showAll: z.boolean().optional().default(false).describe("Also show remote status")
   },
   async (args) => {
+    const path = pickPath("svn_status", args);
     try {
-      const result = await getSvnService().getStatus(args.path, args.showAll);
+      const result = await getSvnService().getStatus(path, args.showAll);
       const statusList = result.data!;
 
       if (statusList.length === 0) {
@@ -232,19 +246,21 @@ server.tool(
 );
 
 // 4. Get change history
-server.tool(
+tool(
   "svn_log",
   "Show the commit history of the repository. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured). Use `stopOnCopy` to get a BRANCH'S OWN revisions instead of everything it inherited from the line it was copied from, and `verbose` to see where it was copied from.",
   {
     path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
+    target: pathAliasArg('path'),
     limit: z.number().optional().default(10).describe("Maximum number of entries"),
     revision: z.string().optional().describe("Specific revision or range (e.g. 100:200)"),
     stopOnCopy: z.boolean().optional().describe("Stop at the revision that created the branch. This is how you review a branch: without it, a branch cut from an old baseline answers with the baseline's whole history. The OLDEST entry returned is the copy itself — exclude it, it is not anyone's work."),
     verbose: z.boolean().optional().describe("Include changed paths, and for a copy the origin path and revision. Combine with `stopOnCopy` to prove which line a branch came from — a released version branches off `bugfixes`, where a defect present in the client's own branch may not exist at all.")
   },
   async (args) => {
+    const path = pickPath("svn_log", args);
     try {
-      const result = await getSvnService().getLog(args.path, args.limit, args.revision, {
+      const result = await getSvnService().getLog(path, args.limit, args.revision, {
         stopOnCopy: args.stopOnCopy,
         verbose: args.verbose
       });
@@ -286,19 +302,21 @@ server.tool(
 );
 
 // 5. View differences
-server.tool(
+tool(
   "svn_diff",
   "Show differences between file revisions. The path may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured). To review a branch, diff its own revisions one by one with `changeRevision` — NOT the branch against its baseline, which is dominated by the baseline's own evolution (measured: 1272 files on a 3-year-old CT-e branch).",
   {
     path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
+    target: pathAliasArg('path'),
     oldRevision: z.string().optional().describe("Old revision"),
     newRevision: z.string().optional().describe("New revision"),
     changeRevision: z.number().int().positive().optional().describe("What this single revision changed (svn --change). Equivalent to the range N-1:N, without the arithmetic. Takes precedence over oldRevision/newRevision."),
-    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000 — a diff can be network-bound.")
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms. Defaults to 300000 — a diff can be network-bound.")
   },
   async (args) => {
+    const path = pickPath("svn_diff", args);
     try {
-      const result = await getSvnService().getDiff(args.path, args.oldRevision, args.newRevision, {
+      const result = await getSvnService().getDiff(path, args.oldRevision, args.newRevision, {
         changeRevision: args.changeRevision,
         timeout: args.timeout
       });
@@ -327,7 +345,7 @@ server.tool(
 );
 
 // 6. Repository checkout
-server.tool(
+tool(
   "svn_checkout",
   "Check out an SVN repository",
   {
@@ -337,7 +355,7 @@ server.tool(
     depth: z.enum(["empty", "files", "immediates", "infinity"]).optional().describe("Checkout depth"),
     force: z.boolean().optional().default(false).describe("Force checkout"),
     ignoreExternals: z.boolean().optional().default(false).describe("Ignore externals"),
-    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000 for this command — checking out a real module branch over the network routinely needs more than the global 30s.")
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms. Defaults to 300000 for this command — checking out a real module branch over the network routinely needs more than the global 30s.")
   },
   async (args) => {
     try {
@@ -378,22 +396,24 @@ server.tool(
 );
 
 // 7. Update working copy
-server.tool(
+tool(
   "svn_update",
   "Update the working copy from the repository. Accepts a local path or a repo-relative path " +
   "(\"/Software/...\"), and `setDepth` to pull just one folder or one file into an otherwise sparse " +
   "working copy — which is how you fetch a single module branch instead of every branch of that module.",
   {
     path: z.string().optional().describe("Path to update — local, or repo-relative starting with \"/\". Omit and the ENTIRE working copy is updated."),
+    target: pathAliasArg('path'),
     revision: z.union([z.number(), z.literal("HEAD"), z.literal("BASE"), z.literal("COMMITTED"), z.literal("PREV")]).optional().describe("Target revision"),
     force: z.boolean().optional().default(false).describe("Force update"),
     ignoreExternals: z.boolean().optional().default(false).describe("Ignore externals"),
     acceptConflicts: z.enum(["postpone", "base", "mine-conflict", "theirs-conflict", "mine-full", "theirs-full"]).optional().describe("How to handle conflicts"),
     depth: z.enum(["empty", "files", "immediates", "infinity"]).optional().describe("Depth for this update only, without recording it."),
     setDepth: z.enum(["empty", "files", "immediates", "infinity", "exclude"]).optional().describe("Record a new depth for this path: `infinity` pulls the whole subtree in, `exclude` drops it. Prefer the SMALLEST path that answers your question — an entire module branch is large (measured: 2376 files, 52.8 MB, and it detaches), while `Oracle/Objetos/Funcoes` alone finishes in ~2s, and ONE FILE is instant: point `path` straight at the file with `setDepth: 'infinity'`. Missing intermediate directories are created by svn itself (`--parents`, always passed), so a deep path into a branch that was never checked out works on the first call — measured: one file out of an absent branch in ~1s."),
-    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000 for this command.")
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms. Defaults to 300000 for this command.")
   },
   async (args) => {
+    const path = pickPath("svn_update", args);
     try {
       const options = {
         revision: args.revision,
@@ -405,18 +425,18 @@ server.tool(
         timeout: args.timeout
       };
 
-      const result = await getSvnService().update(args.path, options);
+      const result = await getSvnService().update(path, options);
 
       if (result.detached) {
         return {
           content: [{ type: "text", text: detachedNotice({
-            jobId: result.jobId, target: args.path, what: 'Update'
+            jobId: result.jobId, target: path, what: 'Update'
           }) }],
         };
       }
 
       const updateText = `🔄 **Update Completed**\n\n` +
-        `**Path:** ${args.path || 'Current directory'}\n` +
+        `**Path:** ${path || 'Current directory'}\n` +
         `**Command:** ${result.command}\n` +
         `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n\n` +
         `**Output:**\n\`\`\`\n${result.data}\n\`\`\``;
@@ -433,7 +453,7 @@ server.tool(
 );
 
 // 8. Add files
-server.tool(
+tool(
   "svn_add",
   "Add files to version control",
   {
@@ -486,7 +506,7 @@ server.tool(
 );
 
 // 9. Commit changes
-server.tool(
+tool(
   "svn_commit",
   "Commit changes to the repository. TWO STEPS: the first call previews what would be committed and " +
   "writes nothing; a second call with `confirm: true` performs it. `paths` is required — a commit with " +
@@ -499,7 +519,7 @@ server.tool(
     force: z.boolean().optional().default(false).describe("Force commit"),
     keepLocks: z.boolean().optional().default(false).describe("Keep locks after commit"),
     noUnlock: z.boolean().optional().default(false).describe("Do not unlock files"),
-    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms.")
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms.")
   },
   async (args) => {
     try {
@@ -591,7 +611,7 @@ server.tool(
 );
 
 // 10. Delete files
-server.tool(
+tool(
   "svn_delete",
   "Remove files from version control",
   {
@@ -639,7 +659,7 @@ server.tool(
 );
 
 // 10.5. Status of a detached operation
-server.tool(
+tool(
   "svn_job_status",
   "Check an SVN operation that was DETACHED for outlasting its threshold. Pass the job id from the " +
   "\"still running\" answer, or omit it to list recent jobs. Detached means the answer came back before " +
@@ -726,7 +746,7 @@ Finished. Confirm the effect with \`svn_info\` / \`svn_log\` on the target — t
 );
 
 // 11. Revert changes
-server.tool(
+tool(
   "svn_revert",
   "Revert local changes on files",
   {
@@ -766,15 +786,17 @@ server.tool(
 );
 
 // 12. Clean up working copy
-server.tool(
+tool(
   "svn_cleanup",
   "Clean up the working copy from interrupted operations",
   {
-    path: z.string().optional().describe("Specific path to clean up")
+    path: z.string().optional().describe("Specific path to clean up"),
+    target: pathAliasArg('path')
   },
   async (args) => {
+    const path = pickPath("svn_cleanup", args);
     try {
-      const result = await getSvnService().cleanup(args.path);
+      const result = await getSvnService().cleanup(path);
 
       // A operacao pode ter destacado: escreve no wc.db e leva o tempo que
       // precisar. Sem isto o texto de sucesso sairia com saida vazia e sem
@@ -782,13 +804,13 @@ server.tool(
       if (result.detached) {
         return {
           content: [{ type: "text", text: detachedNotice({
-            jobId: result.jobId, target: args.path, what: 'Cleanup'
+            jobId: result.jobId, target: path, what: 'Cleanup'
           }) }],
         };
       }
 
       const cleanupText = `🧹 **Cleanup Completed**\n\n` +
-        `**Path:** ${args.path || 'Current directory'}\n` +
+        `**Path:** ${path || 'Current directory'}\n` +
         `**Command:** ${result.command}\n` +
         `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n\n` +
         `**Output:**\n\`\`\`\n${result.data}\n\`\`\``;
@@ -805,11 +827,12 @@ server.tool(
 );
 
 // 13. Show the contents of a versioned file (svn cat)
-server.tool(
+tool(
   "svn_cat",
   "Show the contents of a versioned file. Target may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured, so you can just pass '/trunk/path/to/file.sql'). For a REAL source file here (hundreds of KB) do not pull it inline: use `pattern` to get only the lines you need, or `saveTo` to put it on disk. Both also report the file's ENCODING, which you must know before editing — the web files in this tree are latin1, and editing them as UTF-8 rewrites every accented byte.",
   {
-    target: z.string().describe("Local path, full URL, or repo-relative path like '/trunk/foo.sql'"),
+    target: z.string().optional().describe("REQUIRED (or its alias `path`). Local path, full URL, or repo-relative path like '/trunk/foo.sql'"),
+    path: pathAliasArg('target'),
     revision: z.union([
       z.number(),
       z.literal("HEAD"),
@@ -821,11 +844,12 @@ server.tool(
     saveTo: z.string().optional().describe("Write the file here instead of returning it. The answer carries the path, the byte count and the detected encoding. svn writes the bytes itself, so the content is byte-exact."),
     pattern: z.string().optional().describe("Return only the lines matching this regex, each with its line number. This is how you inspect a large file without spending the whole context on it."),
     contextLines: z.number().int().min(0).max(50).optional().describe("Lines of context around each `pattern` match."),
-    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000.")
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms. Defaults to 300000.")
   },
   async (args) => {
+    const target = pickPath("svn_cat", args, true)!;
     try {
-      const result = await getSvnService().cat(args.target, {
+      const result = await getSvnService().cat(target, {
         revision: args.revision,
         saveTo: args.saveTo,
         pattern: args.pattern,
@@ -835,7 +859,7 @@ server.tool(
       const content = result.data ?? '';
 
       const revisionLabel = args.revision !== undefined ? String(args.revision) : 'HEAD/BASE';
-      const header = `📄 **Contents of ${args.target}** (revision: ${revisionLabel})\n\n` +
+      const header = `📄 **Contents of ${target}** (revision: ${revisionLabel})\n\n` +
         `**Command:** ${result.command}\n` +
         `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n\n`;
 
@@ -861,11 +885,12 @@ server.tool(
 );
 
 // 13b. Line-by-line authorship (svn blame)
-server.tool(
+tool(
   "svn_blame",
   "Who last changed each line, and in which revision. Use it to date and attribute a defect — the difference between \"this block is wrong\" and \"it arrived in r640877, in this commit, alongside these other changes\". ALWAYS narrow the output with `startLine`/`endLine` or `pattern`: a real source file here is thousands of lines and blaming all of them is unusable. Author names come from svn's XML form, so they are complete — the plain text form pads them into a 10-character column and would report `fioravante.manfron` as `fioravante`.",
   {
-    target: z.string().describe("Local path, full URL, or repo-relative path like '/trunk/foo.cfc'"),
+    target: z.string().optional().describe("REQUIRED (or its alias `path`). Local path, full URL, or repo-relative path like '/trunk/foo.cfc'"),
+    path: pathAliasArg('target'),
     revision: z.union([
       z.number(),
       z.literal("HEAD"),
@@ -877,11 +902,12 @@ server.tool(
     startLine: z.number().int().positive().optional().describe("First line to report (1-based, inclusive)"),
     endLine: z.number().int().positive().optional().describe("Last line to report (inclusive)"),
     pattern: z.string().optional().describe("Instead of a line range, report only lines matching this regex. Takes precedence over the range."),
-    timeout: z.number().int().positive().optional().describe("Per-call timeout in ms. Defaults to 300000.")
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms. Defaults to 300000.")
   },
   async (args) => {
+    const target = pickPath("svn_blame", args, true)!;
     try {
-      const result = await getSvnService().blame(args.target, {
+      const result = await getSvnService().blame(target, {
         revision: args.revision,
         startLine: args.startLine,
         endLine: args.endLine,
@@ -911,7 +937,7 @@ server.tool(
         .map(l => `r${l.revision}  ${l.author}  ${String(l.lineNumber).padStart(5)} | ${l.content}`)
         .join('\n');
 
-      const text = `🔍 **Blame of ${args.target}** (${scope})\n\n` +
+      const text = `🔍 **Blame of ${target}** (${scope})\n\n` +
         `**Command:** ${result.command}\n` +
         `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n` +
         summary + `\n\`\`\`\n${body}\n\`\`\``;
@@ -928,11 +954,12 @@ server.tool(
 );
 
 // 14. List entries of a versioned directory (svn list)
-server.tool(
+tool(
   "svn_list",
   "List files and directories of a versioned path. Target may be a local path, a repository URL, or a repo-relative path starting with '/' (joined with SVN_URL when configured). Defaults to the working copy when omitted.",
   {
     target: z.string().optional().describe("Local path, full URL, or repo-relative path like '/tags' (defaults to working copy)"),
+    path: pathAliasArg('target'),
     revision: z.union([
       z.number(),
       z.literal("HEAD"),
@@ -944,20 +971,23 @@ server.tool(
     verbose: z.boolean().optional().default(false).describe("Include revision, author, size and date"),
     recursive: z.boolean().optional().default(false).describe("List recursively"),
     depth: z.enum(["empty", "files", "immediates", "infinity"]).optional().describe("Listing depth"),
-    includeExternals: z.boolean().optional().default(false).describe("Include externals")
+    includeExternals: z.boolean().optional().default(false).describe("Include externals"),
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms. Defaults to 300000 — a listing of a URL, or a recursive one, is network-bound.")
   },
   async (args) => {
+    const target = pickPath("svn_list", args);
     try {
-      const result = await getSvnService().list(args.target, {
+      const result = await getSvnService().list(target, {
         revision: args.revision,
         verbose: args.verbose,
         recursive: args.recursive,
         depth: args.depth,
-        includeExternals: args.includeExternals
+        includeExternals: args.includeExternals,
+        timeout: args.timeout
       });
 
       const { entries, raw } = result.data!;
-      const targetLabel = args.target || 'working copy';
+      const targetLabel = target || 'working copy';
 
       if (entries.length === 0) {
         return {
@@ -992,7 +1022,7 @@ server.tool(
 );
 
 // 15. Clear SVN credentials cache (to resolve E215004 errors)
-server.tool(
+tool(
   "svn_clear_credentials",
   "Clear the SVN credentials cache to resolve authentication errors",
   {},
@@ -1057,6 +1087,7 @@ async function runServer() {
 
     // Create transport
     const transport = new StdioServerTransport();
+    rejectUnknownArgs(transport, toolShapes);
 
     console.error("Connecting server to transport...");
 

@@ -124,7 +124,7 @@ describe('timeout — the network commands get their own default', () => {
       return next === -1 ? rest : rest.slice(0, next);
     };
 
-    for (const signature of ['async checkout(', 'async update(', 'async getDiff(', 'async blame(', 'private async fetchContent(']) {
+    for (const signature of ['async checkout(', 'async update(', 'async getDiff(', 'async blame(', 'async list(', 'private async fetchContent(']) {
       expect(methodBody(signature)).toMatch(/timeout(:| \?\?)[^\n]*NETWORK_TIMEOUT_MS/);
     }
   });

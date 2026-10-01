@@ -1330,7 +1330,9 @@ export class SvnService {
         args.push(resolveTarget(target, this.config).value);
       }
 
-      const response = await executeSvnCommand(this.config, args);
+      const response = await executeSvnCommand(this.config, args, {
+        timeout: options.timeout ?? NETWORK_TIMEOUT_MS
+      });
       const raw = cleanOutput(response.data as string);
       const entries = parseListOutput(raw, !!options.verbose);
 
