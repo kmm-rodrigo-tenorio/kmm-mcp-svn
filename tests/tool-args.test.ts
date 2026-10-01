@@ -1,8 +1,11 @@
 import { describe, it, expect } from '@jest/globals';
 import * as fs from 'fs';
 import * as path from 'path';
+import { PassThrough } from 'stream';
 import { z } from 'zod';
-import { timeoutArg, pickPath, unknownArgsMessage, rejectUnknownArgs } from '../common/tool-args';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { timeoutArg, pickPath, unknownArgsMessage, rejectUnknownArgs, MAX_TIMEOUT_MS } from '../common/tool-args';
 import { SvnService } from '../tools/svn-service';
 
 describe('path/target — the sibling tools name the same thing differently', () => {
@@ -54,26 +57,41 @@ describe('unknown keys — refused, never silently dropped', () => {
     expect(unknownArgsMessage('svn_health_check', {}, { x: 1 })).toContain('takes no parameters');
   });
 
-  it('answers tools/call with InvalidParams before the SDK sees it', async () => {
-    const sent: any[] = [];
-    const dispatched: any[] = [];
-    const transport: any = {
-      start: async () => {},
-      send: async (m: any) => { sent.push(m); },
-      close: async () => {},
-    };
+  it('answers tools/call with InvalidParams through the real SDK server and stdio transport', async () => {
+    // McpServer e StdioServerTransport de verdade: se o SDK deixar de instalar o
+    // onmessage antes do start(), o embrulho e sobrescrito e este teste falha.
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const server = new McpServer({ name: 't', version: '0' });
+    const handled: unknown[] = [];
+    server.tool('svn_list', 'list', shape, async (args) => {
+      handled.push(args);
+      return { content: [{ type: 'text', text: 'ok' }] };
+    });
+    const transport = new StdioServerTransport(stdin, stdout);
     rejectUnknownArgs(transport, new Map([['svn_list', shape]]));
-    transport.onmessage = (m: any) => dispatched.push(m); // o Protocol instala antes do start
-    await transport.start();
+    await server.connect(transport);
 
-    transport.onmessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'svn_list', arguments: { foo: 1 } } });
-    transport.onmessage({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'svn_list', arguments: { target: '/a' } } });
-    transport.onmessage({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
+    const replies = new Map<number, any>();
+    let buf = '';
+    stdout.on('data', (c) => {
+      buf += c;
+      for (let i; (i = buf.indexOf('\n')) >= 0; buf = buf.slice(i + 1)) {
+        const m = JSON.parse(buf.slice(0, i));
+        replies.set(m.id, m);
+      }
+    });
+    const call = (id: number, args: object) => stdin.write(JSON.stringify(
+      { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'svn_list', arguments: args } }) + '\n');
+    call(1, { target: '/a', foo: 1 });
+    call(2, { target: '/a' });
+    while (replies.size < 2) await new Promise(r => setTimeout(r, 10));
+    await server.close();
 
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ id: 1, error: { code: -32602 } });
-    expect(sent[0].error.message).toContain("'foo'");
-    expect(dispatched.map(m => m.id)).toEqual([2, 3]);
+    expect(replies.get(1).error.code).toBe(-32602);
+    expect(replies.get(1).error.message).toContain("unknown parameter(s) 'foo'");
+    expect(replies.get(2).result.content[0].text).toBe('ok');
+    expect(handled).toEqual([{ target: '/a' }]);
   });
 });
 
@@ -89,6 +107,18 @@ describe('timeout — a string is accepted only if it is a clean positive intege
 
   it.each([0, -1, 1.5])('refuses the number %p', (v) => {
     expect(timeoutArg.safeParse(v).success).toBe(false);
+  });
+
+  // Acima de 2^31-1 o setTimeout do Node dispara em 1 ms: o comando morreria na hora.
+  it('accepts the setTimeout ceiling, as number and as text', () => {
+    expect(timeoutArg.parse(MAX_TIMEOUT_MS)).toBe(2147483647);
+    expect(timeoutArg.parse('2147483647')).toBe(2147483647);
+  });
+
+  it.each([2147483648, '2147483648', '99999999999999999999'])('refuses %p above the ceiling', (v) => {
+    const r = timeoutArg.safeParse(v);
+    expect(r.success).toBe(false);
+    expect(r.error!.message).toContain('at most 2147483647 ms');
   });
 });
 

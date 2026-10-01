@@ -3,16 +3,24 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 
+// Teto do setTimeout do Node (2^31-1 ms, ~24,8 dias): acima disso ele dispara em 1 ms
+// e o comando morreria na hora com uma mensagem de timeout enorme.
+export const MAX_TIMEOUT_MS = 2_147_483_647;
+const timeoutMs = z.number().int().positive()
+  .max(MAX_TIMEOUT_MS, `timeout must be at most ${MAX_TIMEOUT_MS} ms`);
+
 /**
  * Timeout por chamada, em ms. Aceita numero ou texto que seja SO digitos ("180000"):
  * o cliente as vezes manda o valor como string, e antes disso a chave era descartada
- * calada. Texto que nao converte limpo ("180000ms", "12.5", "", "-5") e erro.
+ * calada. Texto que nao converte limpo ("180000ms", "12.5", "", "-5") e erro. O texto
+ * passa pela mesma validacao do numero, entao o teto vale para os dois.
  */
 export const timeoutArg = z.union([
-  z.number().int().positive(),
+  timeoutMs,
   z.string()
     .regex(/^[1-9]\d*$/, 'timeout as text must be digits only — a positive whole number of milliseconds, e.g. "180000"')
     .transform(Number)
+    .pipe(timeoutMs)
 ]);
 
 /** Alias do parametro de caminho: as tools irmas chamam o mesmo conceito de `path` ou de `target`. */
