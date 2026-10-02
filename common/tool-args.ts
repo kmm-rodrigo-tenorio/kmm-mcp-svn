@@ -6,21 +6,24 @@ import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 // Teto do setTimeout do Node (2^31-1 ms, ~24,8 dias): acima disso ele dispara em 1 ms
 // e o comando morreria na hora com uma mensagem de timeout enorme.
 export const MAX_TIMEOUT_MS = 2_147_483_647;
-const timeoutMs = z.number().int().positive()
-  .max(MAX_TIMEOUT_MS, `timeout must be at most ${MAX_TIMEOUT_MS} ms`);
+const MAX_TIMEOUT_MSG = `timeout must be at most ${MAX_TIMEOUT_MS} ms`;
 
 /**
  * Timeout por chamada, em ms. Aceita numero ou texto que seja SO digitos ("180000"):
  * o cliente as vezes manda o valor como string, e antes disso a chave era descartada
- * calada. Texto que nao converte limpo ("180000ms", "12.5", "", "-5") e erro. O texto
- * passa pela mesma validacao do numero, entao o teto vale para os dois.
+ * calada. Texto que nao converte limpo ("180000ms", "12.5", "", "-5") e erro. O teto
+ * vale para os dois ramos; texto longo demais vira numero acima dele e cai junto.
+ *
+ * ⚠ No ramo texto o teto e `.refine`, nao `.pipe`: o zod-to-json-schema publica um
+ * pipe como `allOf [string, integer]`, que nenhum valor satisfaz, e o `tools/list`
+ * passaria a dizer que texto nao e aceito. O refine publica so a entrada.
  */
 export const timeoutArg = z.union([
-  timeoutMs,
+  z.number().int().positive().max(MAX_TIMEOUT_MS, MAX_TIMEOUT_MSG),
   z.string()
     .regex(/^[1-9]\d*$/, 'timeout as text must be digits only — a positive whole number of milliseconds, e.g. "180000"')
     .transform(Number)
-    .pipe(timeoutMs)
+    .refine(n => n <= MAX_TIMEOUT_MS, MAX_TIMEOUT_MSG)
 ]);
 
 /** Alias do parametro de caminho: as tools irmas chamam o mesmo conceito de `path` ou de `target`. */

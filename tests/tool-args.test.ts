@@ -120,6 +120,33 @@ describe('timeout — a string is accepted only if it is a clean positive intege
     expect(r.success).toBe(false);
     expect(r.error!.message).toContain('at most 2147483647 ms');
   });
+
+  it('is published by tools/list as number OR digit string, as the server accepts', async () => {
+    // O schema publicado e o contrato que cliente e modelo leem. Um `.pipe` no ramo texto
+    // virava `allOf [string, integer]` (insatisfazivel) sem nenhum teste ficar vermelho.
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const server = new McpServer({ name: 't', version: '0' });
+    server.tool('svn_list', 'list', { timeout: timeoutArg.optional() }, async () => ({ content: [] }));
+    await server.connect(new StdioServerTransport(stdin, stdout));
+    const reply = await new Promise<any>((resolve) => {
+      let buf = '';
+      stdout.on('data', (c) => {
+        buf += c;
+        const i = buf.indexOf('\n');
+        if (i >= 0) resolve(JSON.parse(buf.slice(0, i)));
+      });
+      stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
+    });
+    await server.close();
+
+    expect(reply.result.tools[0].inputSchema.properties.timeout).toEqual({
+      anyOf: [
+        { type: 'integer', exclusiveMinimum: 0, maximum: 2147483647 },
+        { type: 'string', pattern: '^[1-9]\\d*$' }
+      ]
+    });
+  });
 });
 
 describe('svn_list — the per-call timeout reaches the command', () => {
