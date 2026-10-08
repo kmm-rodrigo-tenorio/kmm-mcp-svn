@@ -16,6 +16,8 @@ import {
   SvnBlameLine,
   SvnListOptions,
   SvnListEntry,
+  SvnMergeinfoRevision,
+  SvnMergeResult,
   SvnError
 } from '../common/types.js';
 
@@ -40,7 +42,13 @@ import {
   skippedTargetReason,
   describeEncoding,
   matchLines,
-  parseBlameOutput
+  parseBlameOutput,
+  validateRevisionOrRange,
+  isLocalModification,
+  parseMergeinfoOutput,
+  parseMergeOutput,
+  countConflictMarkers,
+  statusLabel
 } from '../common/utils.js';
 
 import { findOverlappingJob } from '../common/jobs.js';
@@ -87,9 +95,18 @@ export class SvnService {
     // working copy is invalid — wrong, and it hid the path that actually failed.
     const detail: string = (error.stderr && error.stderr.length > 0) ? error.stderr : error.message;
     let hint = '';
+    // Erro que ja passou por aqui (metodo que chama outro metodo do servico) ja traz a dica.
+    const hinted = /\nHint: |\nSTOP: /.test(detail);
+    // Regra 6: sinal de wc.db interrompido ou corrompido. Cada comando svn a mais pode
+    // gravar mais; a recuperacao e decisao de quem e dono da working copy.
+    const stop = `STOP: this can mean a damaged working-copy database. Do not retry, and do not run svn_cleanup on your own — report this error literally to the user and let them decide.`;
 
-    if (detail.includes('E155007') || detail.includes('not a working copy')) {
-      hint = `Hint: that path is not in the working copy. Either '${this.config.workingDirectory}' is not a working copy at all, or the path was never fetched into it — a sparse checkout needs its parent directories pulled at depth empty first.`;
+    if (hinted) {
+      hint = '';
+    } else if (/E155037|E200033|E200004/.test(detail)) {
+      hint = stop;
+    } else if (detail.includes('E155007') || detail.includes('not a working copy')) {
+      hint = `Hint: that path is not in the working copy. Either '${this.config.workingDirectory}' is not a working copy at all, or the path was never fetched into it — a sparse checkout needs its parent directories pulled at depth empty first. If that path WAS versioned before, ${stop.replace('STOP: this', 'this')}`;
     } else if (detail.includes('E175002') || detail.includes('Unable to connect')) {
       hint = `Hint: cannot reach the repository. Check the connection and the credentials.`;
     } else if (detail.includes('E170001') || detail.includes('Authentication failed')) {
@@ -276,14 +293,16 @@ export class SvnService {
       }
 
       if (revision) {
-        // Numero, HEAD, BASE, COMMITTED, PREV ou {DATA}. Sem isto, um objeto
-        // serializado vira argumento do svn e o erro nao nomeia o parametro.
-        if (!validateRevision(String(revision))) {
+        // Numero, HEAD, BASE, COMMITTED, PREV ou {DATA}, ou intervalo A:B com os dois
+        // lados validos. `1:HEAD` + limit 1 + stopOnCopy devolve direto o commit que
+        // criou o branch. Sem isto, um objeto serializado vira argumento do svn e o
+        // erro nao nomeia o parametro.
+        if (!validateRevisionOrRange(String(revision))) {
           throw new SvnError(
-            `Invalid revision: ${revision} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}`
+            `Invalid revision: ${revision} — use a number, HEAD, BASE, COMMITTED, PREV or {DATE}, or a range A:B of those (e.g. 1:HEAD)`
           );
         }
-        args.push('--revision', revision);
+        args.push('--revision', revision.trim());
       }
 
       // Stops at the revision that created the branch, so what comes back is the
@@ -305,7 +324,7 @@ export class SvnService {
 
       let response;
       try {
-        response = await executeSvnCommand(this.config, args);
+        response = await executeSvnCommand(this.config, args, { timeout: options.timeout });
       } catch (error: any) {
         // Detect if SVN is not installed
         if ((error.message.includes('spawn') && error.message.includes('ENOENT')) ||
@@ -914,6 +933,245 @@ export class SvnService {
 
     } catch (error: any) {
       throw new SvnError(`Failed to cleanup: ${error.message}`);
+    }
+  }
+
+  /**
+   * Origem de merge: URL, ou repo-relativo "/..." juntado ao SVN_URL. Caminho local nao:
+   * a origem e uma linha do repositorio, e quem a descobre e o `svn_log` do branch.
+   */
+  private mergeSource(source: string): string {
+    const resolved = resolveTarget(source, this.config);
+    if (resolved.kind !== 'url') {
+      throw new SvnError(
+        `Merge source must be a repository URL, or a repo-relative path starting with "/" with SVN_URL configured — got '${source}'.`
+      );
+    }
+    return resolved.value;
+  }
+
+  /**
+   * Revisoes da origem elegiveis para merge no alvo (default) ou ja mergeadas.
+   *
+   * So leitura: `svn mergeinfo` nao escreve no wc.db, entao roda com timeout comum,
+   * sem detach. Autor/data/mensagem das elegiveis vem de UMA chamada de log no
+   * intervalo das que serao mostradas, filtrada pelo conjunto — nao do `--log` do
+   * mergeinfo, que e texto puro.
+   */
+  async mergeinfo(
+    source: string,
+    target: string,
+    options: { show?: 'eligible' | 'merged'; limit?: number; timeout?: number } = {}
+  ): Promise<SvnResponse<{
+    total: number;
+    revisions: Array<SvnMergeinfoRevision & { author?: string; date?: string; message?: string }>;
+  }>> {
+    try {
+      const sourceUrl = this.mergeSource(source);
+      // Alvo URL fica URL (URL x URL nao toca working copy); o resto e caminho da WC,
+      // com "/..." mapeado para dentro dela — o que inclui o svn:mergeinfo nao commitado.
+      const resolvedTarget = validateSvnUrl(target) ? target : resolveWorkingCopyPath(target, this.config);
+      const show = options.show ?? 'eligible';
+      const limit = options.limit ?? 50;
+      const timeout = options.timeout ?? NETWORK_TIMEOUT_MS;
+
+      const response = await executeSvnCommand(
+        this.config, ['mergeinfo', '--show-revs', show, sourceUrl, resolvedTarget], { timeout }
+      );
+      const all = parseMergeinfoOutput(response.data as string);
+      const shown: Array<SvnMergeinfoRevision & { author?: string; date?: string; message?: string }> = all.slice(0, limit);
+
+      if (show === 'eligible' && shown.length) {
+        const revs = shown.map(r => r.revision);
+        const log = await this.getLog(sourceUrl, undefined, `${Math.min(...revs)}:${Math.max(...revs)}`, { timeout });
+        const byRev = new Map((log.data ?? []).map(e => [e.revision, e]));
+        for (const r of shown) {
+          const entry = byRev.get(r.revision);
+          if (!entry) continue;
+          r.author = entry.author;
+          r.date = entry.date;
+          r.message = entry.message.split('\n')[0];
+        }
+      }
+
+      return {
+        success: true,
+        data: { total: all.length, revisions: shown },
+        command: response.command,
+        workingDirectory: response.workingDirectory,
+        executionTime: response.executionTime
+      };
+    } catch (error: any) {
+      this.handleSvnError(error, 'get merge info (svn mergeinfo)');
+    }
+  }
+
+  /**
+   * Por que um merge em `wcTarget` nao pode ser escrito agora. Vazio = pode.
+   *
+   * ⚠ Merge em WC esparsa NAO falha: o svn pula o que nao esta na WC (`Skipped missing
+   * target`), grava svn:mergeinfo do mesmo jeito, e o proximo merge acha que ja trouxe.
+   */
+  private async mergeBlockers(wcTarget: string): Promise<string[]> {
+    const blockers: string[] = [];
+
+    const info = (await this.getInfo(wcTarget)).data!;
+    // `svn info` so imprime Depth quando NAO e infinity (medido no 1.14.5): ausente = infinity.
+    const depth = info.depth ?? 'infinity';
+    if (info.nodeKind === 'directory' && depth !== 'infinity') {
+      blockers.push(
+        `depth is '${depth}', not 'infinity': svn would skip what is not in the working copy, record ` +
+        `svn:mergeinfo anyway, and the next merge would think it already brought those changes. ` +
+        `Pull the whole branch first (svn_update with setDepth: 'infinity').`
+      );
+    }
+
+    const dirty = (await this.getStatus(wcTarget)).data!.filter(isLocalModification);
+    if (dirty.length) {
+      blockers.push(
+        `the working copy has ${dirty.length} local modification(s): ` +
+        dirty.slice(0, 10).map(s => `${statusLabel(s)} ${s.path}`).join('; ') +
+        (dirty.length > 10 ? '; ...' : '') +
+        `. Merging on top mixes that work with the merge revision — commit or revert it first.`
+      );
+    }
+
+    return blockers;
+  }
+
+  /**
+   * `svn merge --accept postpone [-c <n>] <origem> <alvo>`; com `dryRun`, `--dry-run`.
+   *
+   * ⚠ A previa tambem destaca e nunca e morta: o `svn merge` abre a working copy mesmo
+   * em `--dry-run`, e matar processo svn em working copy e como se perde o wc.db.
+   * Os bloqueios (profundidade, WC suja) aparecem na previa e recusam o real antes de
+   * escrever; job sobreposto recusa os dois.
+   */
+  async merge(
+    source: string,
+    target: string,
+    options: { change?: number; dryRun?: boolean } = {}
+  ): Promise<SvnResponse<SvnMergeResult & { blockers: string[]; target: string; raw: string }>> {
+    try {
+      if (options.change !== undefined && !(Number.isInteger(options.change) && options.change > 0)) {
+        throw new SvnError(`Invalid change: ${options.change} — a positive revision number`);
+      }
+      const sourceUrl = this.mergeSource(source);
+      const wcTarget = resolveWorkingCopyPath(target, this.config);
+      this.assertNoOverlappingJob(wcTarget);
+
+      const blockers = await this.mergeBlockers(wcTarget);
+      if (!options.dryRun && blockers.length) {
+        throw new SvnError(
+          `Refusing to merge into ${wcTarget} — nothing was written:\n- ${blockers.join('\n- ')}`
+        );
+      }
+
+      const args = ['merge', '--accept', 'postpone'];
+      if (options.dryRun) args.push('--dry-run');
+      if (options.change !== undefined) args.push('-c', String(options.change));
+      args.push(sourceUrl, wcTarget);
+
+      const response = await executeSvnCommand(this.config, args, {
+        detachAfterMs: DETACH_AFTER_MS,
+        target: wcTarget
+      });
+      const raw = response.detached ? '' : cleanOutput(response.data as string);
+
+      return {
+        success: true,
+        data: { ...parseMergeOutput(raw), blockers, target: wcTarget, raw },
+        command: response.command,
+        workingDirectory: response.workingDirectory,
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
+      };
+    } catch (error: any) {
+      this.handleSvnError(error, options.dryRun ? 'preview merge (svn merge --dry-run)' : 'merge (svn merge)');
+    }
+  }
+
+  /**
+   * `svn resolve --accept working <arquivo>` — o arquivo como a pessoa/agente o deixou.
+   *
+   * Nao ha outro `accept`: resolver por atacado (`mine-full`/`theirs-full`) e o que a
+   * skill de merge proibe, entao o parametro nao existe. Recusa conflito de arvore
+   * (a pessoa decide) e arquivo com marcador `<<<<<<<`/`>>>>>>>` sobrando. Com `dryRun`
+   * so relata o estado. Profundidade e a default do svn com `--accept`: so o caminho.
+   */
+  async resolve(
+    path: string,
+    options: { dryRun?: boolean } = {}
+  ): Promise<SvnResponse<{
+    path: string;
+    text: boolean;
+    props: boolean;
+    tree: boolean;
+    markers: { open: number; close: number };
+    prej?: string;
+    blockers: string[];
+  }>> {
+    try {
+      const wcPath = resolveWorkingCopyPath(path, this.config);
+      this.assertNoOverlappingJob(wcPath);
+
+      const same = (p: string) => nodePath.resolve(this.config.workingDirectory!, p).replace(/\\/g, '/').toLowerCase();
+      const status = await this.getStatus(wcPath);
+      const entry = status.data!.find(e => same(e.path) === same(wcPath));
+
+      const text = entry?.status === 'conflicted';
+      const props = entry?.props === 'conflicted';
+      const tree = !!entry?.treeConflicted;
+      const markers = text && fs.existsSync(wcPath) && fs.statSync(wcPath).isFile()
+        ? countConflictMarkers(fs.readFileSync(wcPath))
+        : { open: 0, close: 0 };
+      // Conflito de propriedade: `--accept working` fica com o valor atual (o do branch);
+      // o que chegou da origem esta no .prej, e e isso que a previa mostra.
+      const prejPath = `${wcPath}.prej`;
+      const prej = props && fs.existsSync(prejPath) ? fs.readFileSync(prejPath, 'utf8').slice(0, 2000) : undefined;
+
+      const blockers: string[] = [];
+      if (!entry || (!text && !props && !tree)) {
+        blockers.push(`${wcPath} is not in conflict — nothing to resolve.`);
+      }
+      if (tree) {
+        blockers.push(
+          `tree conflict: this tool never resolves one. Report the file and both sides; the person decides.`
+        );
+      }
+      if (markers.open || markers.close) {
+        blockers.push(
+          `the file still has ${markers.open} '<<<<<<<' and ${markers.close} '>>>>>>>' marker line(s) — finish the edit first.`
+        );
+      }
+
+      const command = `${this.config.svnPath} resolve --accept working ${wcPath}`;
+      const state = { path: wcPath, text, props, tree, markers, prej, blockers };
+
+      if (options.dryRun) {
+        return { success: true, data: state, command, workingDirectory: this.config.workingDirectory! };
+      }
+      if (blockers.length) {
+        throw new SvnError(`Refusing to resolve ${wcPath} — nothing was written:\n- ${blockers.join('\n- ')}`);
+      }
+
+      const response = await executeSvnCommand(this.config, ['resolve', '--accept', 'working', wcPath], {
+        detachAfterMs: DETACH_AFTER_MS,
+        target: wcPath
+      });
+
+      return {
+        success: true,
+        data: state,
+        command: response.command,
+        workingDirectory: response.workingDirectory,
+        executionTime: response.executionTime,
+        detached: response.detached,
+        jobId: response.jobId
+      };
+    } catch (error: any) {
+      this.handleSvnError(error, 'resolve (svn resolve)');
     }
   }
 

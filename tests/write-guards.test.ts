@@ -102,6 +102,22 @@ describe('the two-step commit contract is enforced at the tool layer', () => {
     expect(indexSrc).toMatch(/args\.confirm !== true/);
     expect(indexSrc).toContain('nothing was written');
   });
+
+  // Mesmo contrato nas tools de merge: sem confirm, previa e nada escrito.
+  it.each(['svn_merge', 'svn_resolve'])('%s has confirm defaulting to false and previews first', (name) => {
+    const from = indexSrc.indexOf(`"${name}"`);
+    expect(from).toBeGreaterThan(-1);
+    const block = indexSrc.slice(from, indexSrc.indexOf('\ntool(', from));
+    expect(block).toMatch(/confirm: z\.boolean\(\)\.optional\(\)\.default\(false\)/);
+    expect(block).toMatch(/const dryRun = args\.confirm !== true/);
+    expect(block).toContain('nothing was written');
+  });
+
+  it('svn_resolve offers no accept mode — mine-full/theirs-full cannot be asked for', () => {
+    const from = indexSrc.indexOf('"svn_resolve"');
+    const schema = indexSrc.slice(from, indexSrc.indexOf('async (args)', from));
+    expect(schema).not.toMatch(/\baccept\w*:/i);
+  });
 });
 
 describe('timeout — the network commands get their own default', () => {

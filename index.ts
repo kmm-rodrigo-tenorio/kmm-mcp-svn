@@ -6,7 +6,7 @@ import { z } from "zod";
 
 // Import SVN service
 import { SvnService, DETACH_AFTER_MS } from "./tools/svn-service.js";
-import { formatDuration } from "./common/utils.js";
+import { formatDuration, statusLabel } from "./common/utils.js";
 import { getJob, listJobs, SvnJob } from "./common/jobs.js";
 import { timeoutArg, pathAliasArg, pickPath, rejectUnknownArgs } from "./common/tool-args.js";
 
@@ -230,7 +230,11 @@ tool(
             'missing': '❌'
           };
 
-          return `${statusIcon[status.status] || '📄'} **${status.status.toUpperCase()}** - ${status.path}`;
+          // Conflito de arvore/propriedade e mudanca so de propriedade vem fora do `item`.
+          const icon = (status.treeConflicted || status.props === 'conflicted') ? '⚠️'
+            : (status.status === 'normal' && status.props === 'modified') ? '✏️'
+            : statusIcon[status.status] || '📄';
+          return `${icon} **${statusLabel(status)}** - ${status.path}`;
         }).join('\n') +
         `\n\n**Execution Time:** ${formatDuration(result.executionTime || 0)}`;
 
@@ -253,7 +257,7 @@ tool(
     path: z.string().optional().describe("Local path, full URL, or repo-relative path like '/trunk/foo'"),
     target: pathAliasArg('path'),
     limit: z.number().optional().default(10).describe("Maximum number of entries"),
-    revision: z.string().optional().describe("Specific revision or range (e.g. 100:200)"),
+    revision: z.string().optional().describe("Specific revision or range (e.g. 100:200, 1:HEAD). `revision: '1:HEAD'` with `limit: 1`, `stopOnCopy` and `verbose` answers with the branch's creation commit directly — the oldest one, which a newest-first log only reaches after paging."),
     stopOnCopy: z.boolean().optional().describe("Stop at the revision that created the branch. This is how you review a branch: without it, a branch cut from an old baseline answers with the baseline's whole history. The OLDEST entry returned is the copy itself — exclude it, it is not anyone's work."),
     verbose: z.boolean().optional().describe("Include changed paths, and for a copy the origin path and revision. Combine with `stopOnCopy` to prove which line a branch came from — a released version branches off `bugfixes`, where a defect present in the client's own branch may not exist at all.")
   },
@@ -542,7 +546,7 @@ tool(
           if (s.error) return `- \`${s.path}\` — ⚠️ ${s.error}`;
           if (s.entries.length === 0) return `- \`${s.path}\` — no local modification`;
           return `- \`${s.path}\`\n` +
-            s.entries.map(e => `  - \`${e.status}\` ${e.path}`).join('\n');
+            s.entries.map(e => `  - \`${statusLabel(e)}\` ${e.path}`).join('\n');
         });
 
         const nothing = statuses.every(s => !s.error && s.entries.length === 0);
@@ -1021,6 +1025,201 @@ tool(
   }
 );
 
+// 14b. Revisions eligible for (or already in) a merge
+tool(
+  "svn_mergeinfo",
+  "Which revisions of a merge SOURCE are still eligible to merge into a TARGET (default), or are already merged. " +
+  "Read-only. The source is the line the branch was copied from (find it with `svn_log` on the branch: " +
+  "`revision: '1:HEAD', limit: 1, stopOnCopy: true, verbose: true`). Eligible revisions come with author, date " +
+  "and the first line of the message, at most `limit` (default 50), always with the total.",
+  {
+    source: z.string().describe("Merge source: repository URL, or repo-relative path starting with '/' (joined with SVN_URL)."),
+    target: z.string().optional().describe("REQUIRED (or its alias `path`). Working-copy path (local, or repo-relative '/...' mapped into the working copy — this includes uncommitted svn:mergeinfo), or a repository URL (URL x URL touches no working copy)."),
+    path: pathAliasArg('target'),
+    show: z.enum(["eligible", "merged"]).optional().default("eligible").describe("'eligible' (default): still to merge. 'merged': already recorded as merged."),
+    limit: z.number().int().positive().optional().default(50).describe("How many revisions to list (default 50). The total is always reported."),
+    timeout: timeoutArg.optional().describe("Per-call timeout in ms. Defaults to 300000.")
+  },
+  async (args) => {
+    const target = pickPath("svn_mergeinfo", args, true)!;
+    try {
+      const result = await getSvnService().mergeinfo(args.source, target, {
+        show: args.show, limit: args.limit, timeout: args.timeout
+      });
+      const { total, revisions } = result.data!;
+      const head = `🔀 **Merge info — ${args.show}**\n\n**Source:** ${args.source}\n**Target:** ${target}\n`;
+      const tail = `\n**Command:** ${result.command}\n**Execution Time:** ${formatDuration(result.executionTime || 0)}`;
+
+      if (total === 0) {
+        return {
+          content: [{ type: "text", text: head + '\n' + (args.show === 'eligible'
+            ? `✅ **Nothing eligible** — every revision of the source is already merged into the target (or none touches it).`
+            : `No revision of the source is recorded as merged into the target.`) + '\n' + tail }],
+        };
+      }
+
+      const rows = revisions.map(r =>
+        `- r${r.revision}${r.nonInheritable ? '*' : ''}` +
+        (r.author !== undefined ? ` · ${r.author} · ${r.date} · ${r.message}` : '')
+      ).join('\n');
+      const count = revisions.length < total
+        ? `**Showing ${revisions.length} of ${total}** — pass a larger \`limit\` to see more.`
+        : `**${total} revision(s).**`;
+      const star = revisions.some(r => r.nonInheritable)
+        ? `\n\`*\` = non-inheritable: recorded for part of the tree only (typically a merge into a sparse working copy).`
+        : '';
+
+      return {
+        content: [{ type: "text", text: head + '\n' + count + '\n\n' + rows + '\n' + star + tail }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `❌ **Error:** ${error.message}` }],
+      };
+    }
+  }
+);
+
+function renderMergeResult(d: {
+  ranges: string[]; changed: Array<{ action: string; path: string }>; textConflicts: string[];
+  propConflicts: string[]; treeConflicts: string[]; skipped: Array<{ path: string; reason?: string }>; mergeinfo: string[];
+}): string {
+  const section = (title: string, items: string[]) =>
+    items.length ? `**${title} (${items.length}):**\n` + items.map(i => `- ${i}`).join('\n') + '\n\n' : '';
+  const nothing = !d.ranges.length && !d.changed.length && !d.textConflicts.length && !d.propConflicts.length &&
+    !d.treeConflicts.length && !d.skipped.length && !d.mergeinfo.length;
+  if (nothing) {
+    return `✅ **Nothing to merge** — svn had nothing to apply: the revision(s) are already merged into the ` +
+      `target, or do not touch the source path.\n\n`;
+  }
+  return section('Ranges', d.ranges) +
+    section('⚠️ Text conflicts', d.textConflicts) +
+    section('⚠️ Property conflicts', d.propConflicts) +
+    section('🌳 Tree conflicts — the person decides, never resolved by a tool', d.treeConflicts) +
+    section('⏭️ Skipped — NOT merged; with svn:mergeinfo recorded anyway, the next merge will think they came', d.skipped.map(s => `${s.path}${s.reason ? ` — ${s.reason}` : ''}`)) +
+    section('Changed without conflict', d.changed.map(c => `\`${c.action}\` ${c.path}`)) +
+    section('svn:mergeinfo recorded on', d.mergeinfo);
+}
+
+// 14c. Merge from the branch's origin (preview, then confirm)
+tool(
+  "svn_merge",
+  "Merge a SOURCE line into a working-copy TARGET (the branch root). TWO STEPS: the first call runs " +
+  "`svn merge --dry-run` and writes nothing — files by action, text/property/tree conflicts, skipped paths, " +
+  "or 'nothing to merge'. A second call with `confirm: true` runs `svn merge --accept postpone`, which leaves " +
+  "conflicts marked for editing. Without `change` it is a sync (everything eligible); with `change: <n>` only " +
+  "that revision (-c n). Confirm is refused, before writing, when the target is a URL, is not at depth " +
+  "'infinity' (a sparse merge records mergeinfo for what it skipped), has local modifications, or overlaps a " +
+  "running job; the preview lists the same blockers. Never killed by a timeout: past 30s it answers with a job id.",
+  {
+    source: z.string().describe("Merge source: repository URL, or repo-relative path starting with '/' (joined with SVN_URL)."),
+    target: z.string().optional().describe("REQUIRED (or its alias `path`). The working-copy path to merge into — the branch root. Local, or repo-relative '/...' mapped into the working copy. A URL is refused."),
+    path: pathAliasArg('target'),
+    change: z.number().int().positive().optional().describe("Merge only this revision of the source (svn -c). Omit for a sync."),
+    confirm: z.boolean().optional().default(false).describe("Must be true to actually merge. Left false (the default) you get a dry-run preview and nothing is written.")
+  },
+  async (args) => {
+    const target = pickPath("svn_merge", args, true)!;
+    try {
+      const dryRun = args.confirm !== true;
+      const result = await getSvnService().merge(args.source, target, { change: args.change, dryRun });
+
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({
+            jobId: result.jobId, target, what: dryRun ? 'Merge preview' : 'Merge'
+          }) }],
+        };
+      }
+
+      const d = result.data!;
+      const kind = args.change !== undefined ? `revision r${args.change}` : 'sync';
+      const head = (dryRun
+          ? `🔍 **Merge preview (${kind}) — nothing was written**\n\n`
+          : `🔀 **Merge done (${kind}) — the working copy changed, nothing was committed**\n\n`) +
+        `**Source:** ${args.source}\n**Target:** ${d.target}\n**Command:** ${result.command}\n` +
+        `**Execution Time:** ${formatDuration(result.executionTime || 0)}\n\n`;
+      const blockers = d.blockers.length
+        ? `⛔ **Confirm will be refused:**\n${d.blockers.map(b => `- ${b}`).join('\n')}\n\n`
+        : '';
+      const next = dryRun
+        ? `To merge, call again with \`confirm: true\` — after the person approves.`
+        : `Next: \`svn_status\` on the target. Edit each text conflict, then \`svn_resolve\` (preview, then confirm). ` +
+          `Tree conflicts: report them, the person decides. Commit with \`svn_commit\` INCLUDING the branch root — ` +
+          `it carries svn:mergeinfo.`;
+
+      return {
+        content: [{ type: "text", text: head + blockers + renderMergeResult(d) + next }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `❌ **Error:** ${error.message}` }],
+      };
+    }
+  }
+);
+
+// 14d. Mark one conflicted path resolved, as edited (preview, then confirm)
+tool(
+  "svn_resolve",
+  "Mark ONE conflicted path as resolved with the content it has now (`svn resolve --accept working`). TWO STEPS: " +
+  "the first call shows the conflict (text/property/tree) and how many '<<<<<<<'/'>>>>>>>' marker lines remain, " +
+  "and writes nothing; a second call with `confirm: true` marks it. There is no other accept mode — resolving " +
+  "wholesale with mine-full/theirs-full is not offered. Refused: a tree conflict (the person decides), a file " +
+  "with marker lines left, a path not in conflict.",
+  {
+    target: z.string().optional().describe("REQUIRED (or its alias `path`). The conflicted path — local, or repo-relative '/...' mapped into the working copy."),
+    path: pathAliasArg('target'),
+    confirm: z.boolean().optional().default(false).describe("Must be true to actually mark it resolved. Left false (the default) you get the conflict state and nothing is written.")
+  },
+  async (args) => {
+    const target = pickPath("svn_resolve", args, true)!;
+    try {
+      const dryRun = args.confirm !== true;
+      const result = await getSvnService().resolve(target, { dryRun });
+
+      if (result.detached) {
+        return {
+          content: [{ type: "text", text: detachedNotice({ jobId: result.jobId, target, what: 'Resolve' }) }],
+        };
+      }
+
+      const d = result.data!;
+      if (!dryRun) {
+        return {
+          content: [{ type: "text", text:
+            `✅ **Resolved** — ${d.path}\n\n**Command:** ${result.command}\n` +
+            `**Execution Time:** ${formatDuration(result.executionTime || 0)}`
+          }],
+        };
+      }
+
+      const kinds = [d.text && 'text', d.props && 'property', d.tree && 'tree'].filter(Boolean).join(', ') || 'none';
+      const prej = d.props
+        ? `\nProperty conflict: confirming keeps the WORKING value (the branch's).` +
+          (d.prej ? ` What came from the source, from the .prej file:\n\`\`\`\n${d.prej}\n\`\`\`\n` : '\n')
+        : '';
+      const blockers = d.blockers.length
+        ? `\n⛔ **Confirm will be refused:**\n${d.blockers.map(b => `- ${b}`).join('\n')}\n`
+        : '';
+
+      return {
+        content: [{ type: "text", text:
+          `🔍 **Resolve preview — nothing was written**\n\n` +
+          `**Path:** ${d.path}\n**Conflict:** ${kinds}\n` +
+          (d.text ? `**Marker lines left:** ${d.markers.open} '<<<<<<<', ${d.markers.close} '>>>>>>>'\n` : '') +
+          prej + blockers +
+          `\nWould run: \`${result.command}\`. To mark it resolved, call again with \`confirm: true\`.`
+        }],
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: "text", text: `❌ **Error:** ${error.message}` }],
+      };
+    }
+  }
+);
+
 // 15. Clear SVN credentials cache (to resolve E215004 errors)
 tool(
   "svn_clear_credentials",
@@ -1113,6 +1312,9 @@ async function runServer() {
       "svn_cat",
       "svn_blame",
       "svn_list",
+      "svn_mergeinfo",
+      "svn_merge",
+      "svn_resolve",
       "svn_clear_credentials"
     ]);
 

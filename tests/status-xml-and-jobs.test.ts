@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from '@jest/globals';
-import { parseStatusOutput, createSvnConfig, executeSvnCommand } from '../common/utils';
+import { parseStatusOutput, statusLabel, isLocalModification, createSvnConfig, executeSvnCommand } from '../common/utils';
 import {
   registerJob, appendJobOutput, finishJob, getJob, listJobs,
   runningJobs, findOverlappingJob, resetJobs
@@ -68,6 +68,88 @@ describe('parseStatusOutput over --xml', () => {
   it('returns nothing for empty or non-XML input instead of throwing', () => {
     expect(parseStatusOutput('')).toEqual([]);
     expect(parseStatusOutput('not xml at all')).toEqual([]);
+  });
+});
+
+/**
+ * `svn status --xml` real de um branch logo depois de um merge com os tres tipos de
+ * conflito (fixture do interno-26_10_08, svn 1.14.5). Conflito de arvore e de
+ * propriedade vem em atributo proprio, com `item="normal"` — so o `item` nao basta.
+ */
+const AFTER_MERGE_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<status>
+<target
+   path="branches\\b1">
+<entry
+   path="branches\\b1">
+<wc-status
+   item="normal"
+   revision="11"
+   props="modified">
+<commit
+   revision="6">
+<author>dev.branch</author>
+<date>2026-10-08T14:59:20.553057Z</date>
+</commit>
+</wc-status>
+</entry>
+<entry
+   path="branches\\b1\\a.sql">
+<wc-status
+   item="conflicted"
+   revision="11"
+   props="none">
+</wc-status>
+</entry>
+<entry
+   path="branches\\b1\\a.sql.working">
+<wc-status
+   item="unversioned"
+   props="none">
+</wc-status>
+</entry>
+<entry
+   path="branches\\b1\\b.java">
+<wc-status
+   item="normal"
+   revision="11"
+   props="conflicted">
+</wc-status>
+</entry>
+<entry
+   path="branches\\b1\\d.txt">
+<wc-status
+   item="normal"
+   revision="11"
+   props="none"
+   tree-conflicted="true">
+</wc-status>
+</entry>
+</target>
+</status>`;
+
+describe('parseStatusOutput — property and tree state after a merge (AC-6)', () => {
+  const parsed = parseStatusOutput(AFTER_MERGE_XML);
+  const byName = (n: string) => parsed.find(s => s.path.endsWith(n))!;
+
+  it('reads props and tree-conflicted from their own attributes', () => {
+    expect(byName('branches\\b1')).toMatchObject({ status: 'normal', props: 'modified' });
+    expect(byName('b.java')).toMatchObject({ status: 'normal', props: 'conflicted' });
+    expect(byName('d.txt')).toMatchObject({ status: 'normal', treeConflicted: true });
+    expect(byName('a.sql').treeConflicted).toBeUndefined();
+  });
+
+  it('labels none of them NORMAL', () => {
+    expect(statusLabel(byName('branches\\b1'))).toBe('PROPERTIES MODIFIED');
+    expect(statusLabel(byName('b.java'))).toBe('PROPERTY CONFLICT');
+    expect(statusLabel(byName('d.txt'))).toBe('TREE CONFLICT');
+    expect(statusLabel(byName('a.sql'))).toBe('CONFLICTED');
+    expect(statusLabel(byName('a.sql.working'))).toBe('UNVERSIONED');
+  });
+
+  it('counts all four as local modification, and the unversioned leftover not', () => {
+    expect(parsed.filter(isLocalModification).map(s => s.path.split('\\').pop()))
+      .toEqual(['b1', 'a.sql', 'b.java', 'd.txt']);
   });
 });
 

@@ -2,7 +2,7 @@ import { spawn, SpawnOptions } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
-import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SvnChangedPath, SvnListEntry, SVN_STATUS_CODES } from './types.js';
+import { SvnConfig, SvnResponse, SvnError, SvnInfo, SvnStatus, SvnLogEntry, SvnChangedPath, SvnListEntry, SvnMergeinfoRevision, SvnMergeResult, SVN_STATUS_CODES } from './types.js';
 import iconv from 'iconv-lite';
 import { registerJob, appendJobOutput, finishJob } from './jobs.js';
 
@@ -779,6 +779,11 @@ export function parseStatusOutput(output: string): SvnStatus[] {
     const attrs = wc ? wc[1] : '';
     const item = attrs.match(/\bitem="([^"]*)"/)?.[1];
     const revision = attrs.match(/\brevision="(\d+)"/)?.[1];
+    // ⚠ Sem estes dois, mudanca so de propriedade (a raiz com svn:mergeinfo depois de
+    // um merge) saia como NORMAL, e conflito de arvore/propriedade sumia: os dois vem em
+    // atributo proprio, com o `item` em 'normal'.
+    const props = attrs.match(/\bprops="([^"]*)"/)?.[1];
+    const treeConflicted = /\btree-conflicted="true"/.test(attrs);
 
     const commit = body.match(/<commit\b[^>]*\brevision="(\d+)"[^>]*>([\s\S]*?)<\/commit>/);
     const changedRev = commit?.[1];
@@ -795,11 +800,107 @@ export function parseStatusOutput(output: string): SvnStatus[] {
     if (changedRev !== undefined) status.changedRev = Number(changedRev);
     if (author) status.changedAuthor = unescapeXml(author);
     if (date) status.changedDate = date;
+    if (props !== undefined) status.props = props;
+    if (treeConflicted) status.treeConflicted = true;
 
     statusList.push(status);
   }
 
   return statusList;
+}
+
+/**
+ * Rotulo de uma entrada de status para exibicao: o `item` mais o que vem fora dele
+ * (propriedade modificada/em conflito, conflito de arvore). Uma entrada so de
+ * propriedade nao aparece como NORMAL.
+ */
+export function statusLabel(s: SvnStatus): string {
+  const parts: string[] = [];
+  const quietItem = s.status === 'normal' || s.status === 'none';
+  const extra = s.treeConflicted || s.props === 'modified' || s.props === 'conflicted';
+  if (!quietItem || !extra) parts.push(s.status.toUpperCase());
+  if (s.props === 'conflicted') parts.push('PROPERTY CONFLICT');
+  else if (s.props === 'modified') parts.push('PROPERTIES MODIFIED');
+  if (s.treeConflicted) parts.push('TREE CONFLICT');
+  return parts.join(' + ');
+}
+
+/**
+ * A entrada e modificacao local? Nao versionado, ignorado e external nao contam:
+ * merge numa WC com eles e seguro. Todo o resto (inclusive so propriedade e
+ * conflito pendente) mistura trabalho com a revisao de merge.
+ */
+export function isLocalModification(s: SvnStatus): boolean {
+  if (s.treeConflicted) return true;
+  if (s.props === 'modified' || s.props === 'conflicted') return true;
+  return !['unversioned', 'ignored', 'external', 'normal', 'none'].includes(s.status);
+}
+
+/** Linhas `r<n>` / `r<n>*` de `svn mergeinfo --show-revs`. Qualquer outra linha e ignorada. */
+export function parseMergeinfoOutput(output: string): SvnMergeinfoRevision[] {
+  const revisions: SvnMergeinfoRevision[] = [];
+  for (const line of (output ?? '').split(/\r?\n/)) {
+    const m = line.trim().match(/^r(\d+)(\*)?$/);
+    if (m) revisions.push({ revision: Number(m[1]), nonInheritable: !!m[2] });
+  }
+  return revisions;
+}
+
+/**
+ * Saida de `svn merge` (com ou sem `--dry-run`).
+ *
+ * Cada linha de caminho tem quatro colunas e um espaco: texto (A D U G E R C),
+ * propriedade (U G C), trava (B) e arvore (C). Medido no svn 1.14.5:
+ * `C    a.sql` (texto), ` C   b.java` (propriedade), `   C d.txt` (arvore),
+ * `U    c.txt`; ` U   <raiz>` sob `--- Recording mergeinfo` e o svn:mergeinfo.
+ */
+export function parseMergeOutput(output: string): SvnMergeResult {
+  const result: SvnMergeResult = {
+    ranges: [], changed: [], textConflicts: [], propConflicts: [], treeConflicts: [], skipped: [], mergeinfo: []
+  };
+  let inMergeinfo = false;
+
+  for (const line of (output ?? '').split(/\r?\n/)) {
+    if (line.startsWith('--- ')) {
+      inMergeinfo = /^--- (Recording|Eliding) mergeinfo/.test(line);
+      if (line.startsWith('--- Merging')) result.ranges.push(line.slice(4));
+      continue;
+    }
+    const skipped = line.match(/^Skipped(?: [^']*)? '(.+?)'(?:\s*--\s*(.+))?$/);
+    if (skipped) {
+      result.skipped.push({ path: skipped[1], reason: skipped[2]?.trim() });
+      continue;
+    }
+    const m = line.match(/^([ ADUGERC])([ UGC])([ B])([ C]) (.+)$/);
+    if (!m) continue;
+    const [, text, prop, , tree, p] = m;
+    if (inMergeinfo) {
+      result.mergeinfo.push(p);
+      continue;
+    }
+    if (tree === 'C') result.treeConflicts.push(p);
+    if (text === 'C') result.textConflicts.push(p);
+    if (prop === 'C') result.propConflicts.push(p);
+    if (tree !== 'C' && text !== 'C' && prop !== 'C') result.changed.push({ action: (text + prop).trimEnd(), path: p });
+  }
+
+  return result;
+}
+
+/**
+ * Quantas linhas de marcador de conflito `<<<<<<<` / `>>>>>>>` restam nos bytes do
+ * arquivo. Comparacao por prefixo ASCII, entao vale igual para latin1 e UTF-8.
+ * `=======` sozinho nao conta: pode ser conteudo (linha de comentario, por exemplo).
+ */
+export function countConflictMarkers(bytes: Buffer): { open: number; close: number } {
+  let open = 0;
+  let close = 0;
+  for (const raw of bytes.toString('latin1').split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    if (/^<{7}( |$)/.test(line)) open += 1;
+    else if (/^>{7}( |$)/.test(line)) close += 1;
+  }
+  return { open, close };
 }
 
 /**
@@ -972,6 +1073,17 @@ export function validateRevision(revision: string): boolean {
   // `{"$":"HEAD"}`, which is the exact input this guard exists to reject.
   const svnRevisionPattern = /^(\d+|HEAD|BASE|COMMITTED|PREV|\{\d[\d\-:T .+Z]*\})$/i;
   return svnRevisionPattern.test(revision.trim());
+}
+
+/**
+ * Revisao OU intervalo `A:B` (para `svn log -r`), cada lado validado por
+ * `validateRevision`. O `:` dentro de `{DATA}` nao separa: `{2026-01-01T10:00}` e um lado so.
+ * Peg revision continua sem intervalo — use `validateRevision` la.
+ */
+export function validateRevisionOrRange(revision: string): boolean {
+  const range = revision.trim().match(/^(\{[^}]*\}|[^:{}]+):(\{[^}]*\}|[^:{}]+)$/);
+  if (range) return validateRevision(range[1]) && validateRevision(range[2]);
+  return validateRevision(revision);
 }
 
 /**

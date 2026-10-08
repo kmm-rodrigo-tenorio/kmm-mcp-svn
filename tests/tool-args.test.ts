@@ -33,7 +33,9 @@ describe('path/target — the sibling tools name the same thing differently', ()
     for (const tool of ['svn_info', 'svn_status', 'svn_log', 'svn_diff', 'svn_update', 'svn_cleanup', 'svn_list']) {
       expect(indexSrc).toContain(`pickPath("${tool}", args)`);
     }
-    for (const tool of ['svn_cat', 'svn_blame']) {
+    // svn_mergeinfo/svn_merge/svn_resolve: alvo obrigatorio — sem ele o svn usaria o cwd,
+    // que e a raiz da working copy. A origem e `source`, parametro proprio.
+    for (const tool of ['svn_cat', 'svn_blame', 'svn_mergeinfo', 'svn_merge', 'svn_resolve']) {
       expect(indexSrc).toContain(`pickPath("${tool}", args, true)`);
     }
   });

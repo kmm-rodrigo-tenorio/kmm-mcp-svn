@@ -89,6 +89,31 @@ export interface SvnStatus {
   changedRev?: number;
   changedAuthor?: string;
   changedDate?: string;
+  /** Estado das propriedades (`props` do `--xml`): none | normal | modified | conflicted. */
+  props?: string;
+  /** Conflito de arvore: vem em atributo proprio, o `item` continua 'normal'/'deleted'. */
+  treeConflicted?: boolean;
+}
+
+/** Uma linha `r<n>` de `svn mergeinfo --show-revs`; `*` = nao herdavel (merge parcial da arvore). */
+export interface SvnMergeinfoRevision {
+  revision: number;
+  nonInheritable: boolean;
+}
+
+/** Saida de `svn merge` (real ou `--dry-run`), separada pelo que a pessoa precisa decidir. */
+export interface SvnMergeResult {
+  /** As linhas `--- Merging ...`. */
+  ranges: string[];
+  /** Caminhos sem conflito, com a acao das colunas (texto/propriedade), p.ex. `U`, ` U`, `D`, `A`. */
+  changed: Array<{ action: string; path: string }>;
+  textConflicts: string[];
+  propConflicts: string[];
+  treeConflicts: string[];
+  /** `Skipped ...`: em WC esparsa e o sinal de que o merge gravou mergeinfo sem trazer tudo. */
+  skipped: Array<{ path: string; reason?: string }>;
+  /** Caminhos sob `--- Recording mergeinfo` / `--- Eliding mergeinfo`. */
+  mergeinfo: string[];
 }
 
 export interface SvnLogEntry {
