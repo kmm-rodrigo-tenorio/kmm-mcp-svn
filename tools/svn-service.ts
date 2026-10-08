@@ -103,7 +103,9 @@ export class SvnService {
 
     if (hinted) {
       hint = '';
-    } else if (/E155037|E200033|E200004/.test(detail)) {
+    } else if (/E155037|E200033|E200004|E200030|E155016|sqlite|disk image is malformed|is corrupt/.test(detail)) {
+      // E200030 'database disk image is malformed' e E155016 'working copy database ... is
+      // corrupt' medidos num wc.db danificado de proposito (copia da fixture).
       hint = stop;
     } else if (detail.includes('E155007') || detail.includes('not a working copy')) {
       hint = `Hint: that path is not in the working copy. Either '${this.config.workingDirectory}' is not a working copy at all, or the path was never fetched into it — a sparse checkout needs its parent directories pulled at depth empty first. If that path WAS versioned before, ${stop.replace('STOP: this', 'this')}`;
@@ -111,10 +113,10 @@ export class SvnService {
       hint = `Hint: cannot reach the repository. Check the connection and the credentials.`;
     } else if (detail.includes('E170001') || detail.includes('Authentication failed')) {
       hint = `Hint: authentication failed. Check the SVN username and password.`;
-    } else if (detail.includes('E155036') || detail.includes('working copy locked')) {
-      hint = `Hint: the working copy is locked — run svn_cleanup.`;
-    } else if (detail.includes('E200030') || detail.includes('sqlite')) {
-      hint = `Hint: working copy database error — run svn_cleanup.`;
+    } else if (/E155004|working copy locked/i.test(detail)) {
+      // Lock real e E155004 (medido); o svn manda rodar cleanup, mas pela regra 5 primeiro
+      // se confere se ha processo svn vivo — e ha merge/update destacados rodando por tras.
+      hint = `Hint: the working copy is locked. Another svn operation may still be running on it — check svn_job_status and the process list (tasklist, svn.exe) and wait for it; never run svn_cleanup while one is alive. If none is alive, the lock was left by an interrupted operation: ${stop.replace('STOP: this can mean', 'that can mean')}`;
     }
 
     throw new SvnError(`Failed to ${operation}: ${detail}${hint ? `\n${hint}` : ''}`);
@@ -1025,7 +1027,8 @@ export class SvnService {
       blockers.push(
         `depth is '${depth}', not 'infinity': svn would skip what is not in the working copy, record ` +
         `svn:mergeinfo anyway, and the next merge would think it already brought those changes. ` +
-        `Pull the whole branch first (svn_update with setDepth: 'infinity').`
+        `Pulling the whole branch (svn_update with setDepth: 'infinity') can be large: report the ` +
+        `depth, measure the working copy (size of .svn/wc.db) and ask the user before pulling it.`
       );
     }
 

@@ -146,6 +146,20 @@ describe('update — set-depth guard reads an absent Depth as infinity', () => {
     await expect(svc({ nodeKind: 'directory', depth: 'infinity' }).update('/Software/_dev', { setDepth: 'empty' } as any))
       .rejects.toThrow(/currently at depth 'infinity'/);
   });
+
+  // O outro lado: arquivo nao tem linha Depth (nao vira infinity), e diretorio ja raso
+  // pode receber a mesma profundidade — o caminho do /kmm-fix numa WC esparsa. Passam pela
+  // trava e morrem no spawn do binario inexistente, nunca nela. (immediates -> empty fica
+  // de fora de proposito: e o H1, estreitamento real que a trava ainda nao pega.)
+  it.each([
+    [{ nodeKind: 'file' }, 'empty'],
+    [{ nodeKind: 'directory', depth: 'empty' }, 'empty'],
+    [{ nodeKind: 'directory', depth: 'immediates' }, 'immediates']
+  ])('lets %p through with --set-depth %s', async (info, setDepth) => {
+    const err: any = await svc(info).update('/Software/_dev/x', { setDepth } as any).catch(e => e);
+    expect(err.message).toMatch(/^Failed to update: /);
+    expect(err.message).not.toMatch(/currently at depth|Refusing --set-depth/);
+  });
 });
 
 describe('timeout — the network commands get their own default', () => {

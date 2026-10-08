@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from '@jest/globals';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -170,9 +170,19 @@ win('svn_merge / svn_resolve / svn_mergeinfo guards (AC-1, AC-3, AC-5)', () => {
   const URL = 'file:///C:/repo';
   const svc = () => new FakeService({ svnPath: fakeSvn, workingDirectory: wc, url: URL });
 
+  // createSvnConfig cai em SVN_URL/SVN_REPOSITORY_URL quando o servico nasce sem url: o
+  // env do MCP nao pode decidir o teste de origem nao-URL.
+  const envUrl = { SVN_URL: process.env.SVN_URL, SVN_REPOSITORY_URL: process.env.SVN_REPOSITORY_URL };
+
   beforeAll(() => {
+    delete process.env.SVN_URL;
+    delete process.env.SVN_REPOSITORY_URL;
     fs.mkdirSync(wc, { recursive: true });
     fs.writeFileSync(fakeSvn, '@echo off\r\nif "%1"=="mergeinfo" (echo r7& echo r9*& echo r12)\r\nexit /b 0\r\n');
+  });
+  afterAll(() => {
+    for (const [k, v] of Object.entries(envUrl)) if (v !== undefined) process.env[k] = v;
+    fs.rmSync(dir, { recursive: true, force: true });
   });
   beforeEach(() => resetJobs());
 
@@ -307,13 +317,28 @@ describe('rules 5 and 6 — merge and resolve are never killed, wc.db errors say
   it.each([
     'svn: E155037: Previous operation has not finished; run \'cleanup\' if it was interrupted',
     'svn: E200033: sqlite[S5]: database is locked',
-    'svn: E200004: Could not convert \'\\x01\' into a number'
+    'svn: E200004: Could not convert \'\\x01\' into a number',
+    // Medidos numa copia da WC da fixture com o wc.db danificado de proposito.
+    'svn: E200030: sqlite[S11]: database disk image is malformed',
+    'svn: E155016: The working copy database at \'C:\\wc\' is corrupt.'
   ])('keeps svn\'s words and adds the stop instruction: %p', (stderr) => {
     const svc = new SvnService({ workingDirectory: 'C:/SVN' });
     expect(() => (svc as any).handleSvnError({ stderr }, 'merge')).toThrow(
       expect.objectContaining({ message: expect.stringMatching(/STOP: .*do not run svn_cleanup/) })
     );
     expect(() => (svc as any).handleSvnError({ stderr }, 'merge')).toThrow(stderr.slice(0, 20));
+  });
+
+  it('a locked working copy says to look for a live svn process, never to run svn_cleanup', () => {
+    // Medido: lock no WC_LOCK de uma copia da fixture -> svn update.
+    const stderr = 'svn: E155004: Run \'svn cleanup\' to remove locks (type \'svn help cleanup\' for details)\n' +
+      'svn: E155004: Working copy \'C:\\wc\\branches\' locked.';
+    let message = '';
+    try { (new SvnService({ workingDirectory: 'C:/SVN' }) as any).handleSvnError({ stderr }, 'merge'); }
+    catch (e: any) { message = e.message; }
+    expect(message).toContain(stderr);
+    expect(message).toMatch(/svn_job_status[\s\S]*never run svn_cleanup while one is alive[\s\S]*do not run svn_cleanup on your own/);
+    expect(message).not.toMatch(/— run svn_cleanup/);
   });
 
   it('does not stack a second hint on an error that already carries one', () => {
