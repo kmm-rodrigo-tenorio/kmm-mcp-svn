@@ -120,6 +120,34 @@ describe('the two-step commit contract is enforced at the tool layer', () => {
   });
 });
 
+describe('update — set-depth guard reads an absent Depth as infinity', () => {
+  // `svn info` nao imprime Depth quando o diretorio esta em infinity. A trava
+  // comparava depth === 'infinity' e nunca disparava: estreitar um diretorio
+  // povoado passava calado.
+  class InfoFake extends SvnService {
+    info: any = { nodeKind: 'directory' };
+    async getInfo(): Promise<any> {
+      return { success: true, data: this.info, command: 'fake info', workingDirectory: '' };
+    }
+  }
+  // WC e binario inexistentes: se a trava falhar, o svn nao roda contra C:/SVN.
+  const svc = (info?: any) => {
+    const s = new InfoFake({ workingDirectory: 'C:/nao-existe-wc', svnPath: 'C:/nao-existe/svn.exe' });
+    if (info) s.info = info;
+    return s;
+  };
+
+  it.each(['empty', 'files', 'immediates', 'exclude'])('refuses --set-depth %s on a directory with no Depth line', async (setDepth) => {
+    await expect(svc().update('/Software/_dev', { setDepth } as any))
+      .rejects.toThrow(/currently at depth 'infinity'/);
+  });
+
+  it('still refuses an explicit infinity', async () => {
+    await expect(svc({ nodeKind: 'directory', depth: 'infinity' }).update('/Software/_dev', { setDepth: 'empty' } as any))
+      .rejects.toThrow(/currently at depth 'infinity'/);
+  });
+});
+
 describe('timeout — the network commands get their own default', () => {
   it('is larger than the global default', () => {
     expect(NETWORK_TIMEOUT_MS).toBeGreaterThan(createSvnConfig().timeout!);

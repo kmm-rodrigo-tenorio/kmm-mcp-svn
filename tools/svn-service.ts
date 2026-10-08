@@ -569,7 +569,10 @@ export class SvnService {
         let atual: string | undefined;
         try {
           const info = await this.getInfo(target);
-          atual = (info.data as any)?.depth;
+          const d = info.data as any;
+          // `svn info` so imprime Depth quando NAO e infinity (medido no 1.14.5):
+          // diretorio sem Depth = infinity. Sem isso a trava nunca disparava.
+          atual = d?.nodeKind === 'directory' ? (d.depth ?? 'infinity') : d?.depth;
         } catch (e: any) {
           // Falhar ao LER nao pode virar permissao para ESCREVER. Duas causas
           // muito diferentes chegam aqui:
