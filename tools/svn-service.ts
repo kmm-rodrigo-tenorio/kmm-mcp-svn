@@ -1046,7 +1046,9 @@ export class SvnService {
   }
 
   /**
-   * `svn merge --accept postpone [-c <n>] <origem> <alvo>`; com `dryRun`, `--dry-run`.
+   * `svn merge --accept postpone [-c <n> | -c <lista>] <origem> <alvo>`; com `dryRun`, `--dry-run`.
+   * `revisions` e a lista do svn (`654497,654737-654740`): varias revisoes num merge so,
+   * sem commit entre elas — o `-c` com uma so obriga commit a cada uma.
    *
    * ⚠ A previa tambem destaca e nunca e morta: o `svn merge` abre a working copy mesmo
    * em `--dry-run`, e matar processo svn em working copy e como se perde o wc.db.
@@ -1056,11 +1058,26 @@ export class SvnService {
   async merge(
     source: string,
     target: string,
-    options: { change?: number; dryRun?: boolean } = {}
+    options: { change?: number; revisions?: string; dryRun?: boolean } = {}
   ): Promise<SvnResponse<SvnMergeResult & { blockers: string[]; target: string; raw: string }>> {
     try {
       if (options.change !== undefined && !(Number.isInteger(options.change) && options.change > 0)) {
         throw new SvnError(`Invalid change: ${options.change} — a positive revision number`);
+      }
+      if (options.revisions !== undefined) {
+        if (options.change !== undefined) {
+          throw new SvnError('Pass `change` or `revisions`, not both');
+        }
+        const pieces = options.revisions.split(',');
+        const bad = pieces.find(p => {
+          const m = /^([1-9]\d*)(?:-([1-9]\d*))?$/.exec(p);
+          return !m || (m[2] !== undefined && Number(m[2]) < Number(m[1]));
+        });
+        if (bad !== undefined) {
+          throw new SvnError(
+            `Invalid revisions: '${options.revisions}' — comma-separated revisions or ascending N-M ranges, e.g. 654497,654737-654740`
+          );
+        }
       }
       const sourceUrl = this.mergeSource(source);
       const wcTarget = resolveWorkingCopyPath(target, this.config);
@@ -1076,6 +1093,7 @@ export class SvnService {
       const args = ['merge', '--accept', 'postpone'];
       if (options.dryRun) args.push('--dry-run');
       if (options.change !== undefined) args.push('-c', String(options.change));
+      if (options.revisions !== undefined) args.push('-c', options.revisions);
       args.push(sourceUrl, wcTarget);
 
       const response = await executeSvnCommand(this.config, args, {

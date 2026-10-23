@@ -239,6 +239,20 @@ win('svn_merge / svn_resolve / svn_mergeinfo guards (AC-1, AC-3, AC-5)', () => {
     await expect(svc().merge('/trunk', '/branches/b1', { dryRun: true })).rejects.toThrow(/Another SVN operation/);
   });
 
+  it('passes a revision list as one -c', async () => {
+    const r = await svc().merge('/trunk', '/branches/b1', { revisions: '7,9-12', dryRun: true });
+    expect(r.command).toContain(`--dry-run -c 7,9-12 ${URL}/trunk`);
+  });
+
+  it.each(['', '9-7', '7,', '0', '7;rm', '-c 7'])('refuses a malformed revision list: %p', async (revisions) => {
+    await expect(svc().merge('/trunk', '/branches/b1', { revisions, dryRun: true })).rejects.toThrow(/Invalid revisions/);
+  });
+
+  it('refuses change and revisions together', async () => {
+    await expect(svc().merge('/trunk', '/branches/b1', { change: 7, revisions: '9', dryRun: true }))
+      .rejects.toThrow(/not both/);
+  });
+
   it('refuses a change that is not a positive revision', async () => {
     await expect(svc().merge('/trunk', '/branches/b1', { change: 0 })).rejects.toThrow(/Invalid change/);
   });

@@ -1107,8 +1107,10 @@ tool(
   "Merge a SOURCE line into a working-copy TARGET (the branch root). TWO STEPS: the first call runs " +
   "`svn merge --dry-run` and writes nothing — files by action, text/property/tree conflicts, skipped paths, " +
   "or 'nothing to merge'. A second call with `confirm: true` runs `svn merge --accept postpone`, which leaves " +
-  "conflicts marked for editing. Without `change` it is a sync (everything eligible); with `change: <n>` only " +
-  "that revision (-c n). Confirm is refused, before writing, when the target is a URL, is not at depth " +
+  "conflicts marked for editing. Without `change`/`revisions` it is a sync (everything eligible); with `change: <n>` only " +
+  "that revision (-c n); with `revisions: '654497-654740'` those revisions in ONE merge (-c, N-M inclusive). Prefer one " +
+  "contiguous range: with a comma list svn applies each item as a separate step and STOPS at the first step with a " +
+  "conflict (E155015), and the rest cannot be confirmed on the now-modified working copy. Confirm is refused, before writing, when the target is a URL, is not at depth " +
   "'infinity' (a sparse merge records mergeinfo for what it skipped), has local modifications, or overlaps a " +
   "running job; the preview lists the same blockers. Never killed by a timeout: past 30s it answers with a job id.",
   {
@@ -1116,13 +1118,14 @@ tool(
     target: z.string().optional().describe("REQUIRED (or its alias `path`). The working-copy path to merge into — the branch root. Local, or repo-relative '/...' mapped into the working copy. A URL is refused."),
     path: pathAliasArg('target'),
     change: z.number().int().positive().optional().describe("Merge only this revision of the source (svn -c). Omit for a sync."),
+    revisions: z.string().optional().describe("Several revisions of the source in one merge, as svn -c takes them: N-M inclusive, or comma-separated (e.g. '654497-654740'). Prefer one contiguous range — each comma item is a separate step that stops at the first conflict. Not together with `change`."),
     confirm: z.boolean().optional().default(false).describe("Must be true to actually merge. Left false (the default) you get a dry-run preview and nothing is written.")
   },
   async (args) => {
     const target = pickPath("svn_merge", args, true)!;
     try {
       const dryRun = args.confirm !== true;
-      const result = await getSvnService().merge(args.source, target, { change: args.change, dryRun });
+      const result = await getSvnService().merge(args.source, target, { change: args.change, revisions: args.revisions, dryRun });
 
       if (result.detached) {
         return {
@@ -1133,7 +1136,8 @@ tool(
       }
 
       const d = result.data!;
-      const kind = args.change !== undefined ? `revision r${args.change}` : 'sync';
+      const kind = args.change !== undefined ? `revision r${args.change}`
+        : args.revisions !== undefined ? `revisions ${args.revisions}` : 'sync';
       const head = (dryRun
           ? `🔍 **Merge preview (${kind}) — nothing was written**\n\n`
           : `🔀 **Merge done (${kind}) — the working copy changed, nothing was committed**\n\n`) +
